@@ -30,6 +30,8 @@ const CHAT_COMPLETIONS_PATH = "/chat/completions";
 const MODELS_PATH = "/models";
 const MAX_TRANSCRIPT_CHARS = 30000;
 const MAX_FEATHERLESS_ATTEMPTS = 3;
+const MAX_NOTE_COMPLETION_ATTEMPTS = 2;
+const NOTE_MAX_TOKENS = 4000;
 
 const SYSTEM_PROMPT = `You are a multilingual medical scribe for clinics.
 Faithfully transform transcript text into structured clinical documentation.
@@ -39,6 +41,8 @@ Separate uncertain information clearly in the uncertainties array.
 Preserve medication names exactly when possible.
 Produce patient-friendly discharge instructions in simpler language.
 Output valid JSON only.
+Do not include reasoning, chain-of-thought, markdown, or commentary.
+Start the response with { and end it with }.
 
 The JSON schema must be exactly:
 {
@@ -248,6 +252,33 @@ const getTextFromContentPart = (value: unknown) => {
   return typeof nestedText?.value === "string" ? nestedText.value : null;
 };
 
+const getFeatherlessResponseSummary = (value: unknown) => {
+  const response = asRecord(value);
+  const choices = response?.choices;
+  const choice = Array.isArray(choices) ? asRecord(choices[0]) : null;
+  const message = asRecord(choice?.message);
+  const content = message?.content;
+  const reasoning = message?.reasoning;
+  const usage = asRecord(response?.usage);
+
+  return {
+    id: typeof response?.id === "string" ? response.id : undefined,
+    model: typeof response?.model === "string" ? response.model : undefined,
+    finish_reason:
+      typeof choice?.finish_reason === "string" ? choice.finish_reason : undefined,
+    content_type: Array.isArray(content) ? "array" : typeof content,
+    content_length:
+      typeof content === "string"
+        ? content.length
+        : Array.isArray(content)
+          ? content.length
+          : undefined,
+    has_reasoning: typeof reasoning === "string" && reasoning.length > 0,
+    reasoning_length: typeof reasoning === "string" ? reasoning.length : undefined,
+    usage: usage ?? undefined,
+  };
+};
+
 const getModelContent = (value: unknown) => {
   const response = asRecord(value);
   const choices = response?.choices;
@@ -262,7 +293,7 @@ const getModelContent = (value: unknown) => {
   const content = message?.content;
 
   if (typeof content === "string") {
-    return content;
+    return content.trim() ? content : null;
   }
 
   if (!Array.isArray(content)) {
@@ -275,6 +306,26 @@ const getModelContent = (value: unknown) => {
 
   return textParts.length > 0 ? textParts.join("\n") : null;
 };
+
+const createNoteCompletionBody = (trimmedTranscript: string) => ({
+  model: NOTE_MODEL,
+  temperature: 0,
+  max_tokens: NOTE_MAX_TOKENS,
+  response_format: { type: "json_object" },
+  messages: [
+    { role: "system", content: SYSTEM_PROMPT },
+    {
+      role: "user",
+      content: [
+        "Create the clinical note JSON from this transcript.",
+        "Return only the final JSON object. Do not include analysis or reasoning.",
+        "Use non-thinking mode if supported. /no_think",
+        "",
+        trimmedTranscript,
+      ].join("\n"),
+    },
+  ],
+});
 
 const normalizeNoteJson = (value: unknown): NoteJson => {
   const source =
@@ -364,69 +415,103 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   });
 
   try {
-    const upstreamResponse = await fetchJsonWithRetries(featherlessChatUrl, {
-      method: "POST",
-      headers: upstreamHeaders,
-      body: JSON.stringify({
-        model: NOTE_MODEL,
-        temperature: 0.1,
-        max_tokens: 1200,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          {
-            role: "user",
-            content: `Create the clinical note JSON from this transcript:\n\n${trimmedTranscript}`,
-          },
-        ],
-      }),
-    });
+    let emptyResponseSummary: ReturnType<
+      typeof getFeatherlessResponseSummary
+    > | null = null;
 
-    if (!upstreamResponse.ok) {
-      const details = getUpstreamErrorDetails(upstreamResponse.json);
-
-      logError("Featherless returned non-2xx status", {
-        endpoint: featherlessChatUrl,
-        status: upstreamResponse.status,
-        details,
+    for (
+      let completionAttempt = 1;
+      completionAttempt <= MAX_NOTE_COMPLETION_ATTEMPTS;
+      completionAttempt += 1
+    ) {
+      const upstreamResponse = await fetchJsonWithRetries(featherlessChatUrl, {
+        method: "POST",
+        headers: upstreamHeaders,
+        body: JSON.stringify(createNoteCompletionBody(trimmedTranscript)),
       });
 
-      return jsonResponse(
-        {
-          error: "Failed to generate note with Featherless.",
+      if (!upstreamResponse.ok) {
+        const details = getUpstreamErrorDetails(upstreamResponse.json);
+
+        logError("Featherless returned non-2xx status", {
           endpoint: featherlessChatUrl,
           status: upstreamResponse.status,
           details,
-        },
-        { status: upstreamResponse.status },
-      );
+        });
+
+        return jsonResponse(
+          {
+            error: "Failed to generate note with Featherless.",
+            endpoint: featherlessChatUrl,
+            status: upstreamResponse.status,
+            details,
+          },
+          { status: upstreamResponse.status },
+        );
+      }
+
+      const modelContent = getModelContent(upstreamResponse.json);
+      const responseSummary = getFeatherlessResponseSummary(upstreamResponse.json);
+
+      if (!modelContent) {
+        emptyResponseSummary = responseSummary;
+        logError("Featherless response did not include final note content", {
+          endpoint: featherlessChatUrl,
+          completionAttempt,
+          maxCompletionAttempts: MAX_NOTE_COMPLETION_ATTEMPTS,
+          response: responseSummary,
+        });
+
+        if (completionAttempt < MAX_NOTE_COMPLETION_ATTEMPTS) {
+          await sleep(250 * completionAttempt);
+          continue;
+        }
+
+        break;
+      }
+
+      try {
+        const parsedNote = parseModelJson(modelContent);
+        return jsonResponse(normalizeNoteJson(parsedNote));
+      } catch (error) {
+        const details =
+          error instanceof Error ? error.message : "Unknown parse error";
+
+        logError("The model response could not be parsed as valid JSON", {
+          endpoint: featherlessChatUrl,
+          completionAttempt,
+          maxCompletionAttempts: MAX_NOTE_COMPLETION_ATTEMPTS,
+          details,
+          response: responseSummary,
+          rawPreview: modelContent.slice(0, 300),
+        });
+
+        if (completionAttempt < MAX_NOTE_COMPLETION_ATTEMPTS) {
+          await sleep(250 * completionAttempt);
+          continue;
+        }
+
+        return jsonResponse(
+          {
+            error: "The model response could not be parsed as valid JSON.",
+            details,
+            response: responseSummary,
+            raw: modelContent.slice(0, 1000),
+          },
+          { status: 502 },
+        );
+      }
     }
 
-    const modelContent = getModelContent(upstreamResponse.json);
-
-    if (!modelContent) {
-      return jsonResponse(
-        {
-          error: "Featherless response did not include note content.",
-          details: upstreamResponse.json,
-        },
-        { status: 502 },
-      );
-    }
-
-    try {
-      const parsedNote = parseModelJson(modelContent);
-      return jsonResponse(normalizeNoteJson(parsedNote));
-    } catch (error) {
-      return jsonResponse(
-        {
-          error: "The model response could not be parsed as valid JSON.",
-          details: error instanceof Error ? error.message : "Unknown parse error",
-          raw: modelContent.slice(0, 1000),
-        },
-        { status: 502 },
-      );
-    }
+    return jsonResponse(
+      {
+        error: "Featherless did not return final note JSON.",
+        details:
+          "The model stopped before producing message content. Try again, or use a non-reasoning note model if this repeats.",
+        response: emptyResponseSummary,
+      },
+      { status: 502 },
+    );
   } catch (error) {
     logError("Featherless request failed after retries", {
       endpoint: featherlessChatUrl,
