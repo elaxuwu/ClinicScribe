@@ -21,7 +21,53 @@ type RealtimeEvent = {
   [key: string]: unknown;
 };
 
+type NoteResult = {
+  language_detected: string;
+  soap: {
+    subjective: string;
+    objective: string;
+    assessment: string;
+    plan: string;
+  };
+  visit_summary: string;
+  extracted: {
+    symptoms: string[];
+    medications: string[];
+    follow_up_plan: string[];
+    red_flags: string[];
+  };
+  discharge_instructions: string;
+  uncertainties: string[];
+};
+
 const REALTIME_URL = "https://api.featherless.ai/v1/realtime";
+
+const getErrorMessage = (value: unknown, fallback: string) => {
+  if (value && typeof value === "object" && "error" in value) {
+    const error = (value as { error?: unknown }).error;
+    if (typeof error === "string") {
+      return error;
+    }
+  }
+
+  return fallback;
+};
+
+const renderList = (items: string[]) => {
+  if (items.length === 0) {
+    return <p className="text-sm text-zinc-500">None documented.</p>;
+  }
+
+  return (
+    <ul className="space-y-2 text-sm leading-6 text-zinc-700">
+      {items.map((item, index) => (
+        <li key={`${item}-${index}`} className="rounded-lg bg-zinc-50 px-3 py-2">
+          {item}
+        </li>
+      ))}
+    </ul>
+  );
+};
 
 function App() {
   const [transcript, setTranscript] = useState("");
@@ -29,6 +75,9 @@ function App() {
   const [isConnecting, setIsConnecting] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isGeneratingNote, setIsGeneratingNote] = useState(false);
+  const [noteError, setNoteError] = useState("");
+  const [noteResult, setNoteResult] = useState<NoteResult | null>(null);
 
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const dataChannelRef = useRef<RTCDataChannel | null>(null);
@@ -244,25 +293,66 @@ function App() {
     void startRecording();
   };
 
+  const generateNote = async () => {
+    setIsGeneratingNote(true);
+    setNoteError("");
+    setNoteResult(null);
+
+    try {
+      const response = await fetch("/api/make-note", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ transcript }),
+      });
+
+      const responseText = await response.text();
+      let responseJson: unknown;
+
+      try {
+        responseJson = JSON.parse(responseText);
+      } catch {
+        throw new Error("The note endpoint returned invalid JSON.");
+      }
+
+      if (!response.ok) {
+        throw new Error(
+          getErrorMessage(responseJson, "Unable to generate note from transcript."),
+        );
+      }
+
+      setNoteResult(responseJson as NoteResult);
+    } catch (error) {
+      setNoteError(
+        error instanceof Error
+          ? error.message
+          : "Something went wrong while generating the note.",
+      );
+    } finally {
+      setIsGeneratingNote(false);
+    }
+  };
+
   useEffect(() => {
     return cleanupConnection;
   }, [cleanupConnection]);
 
   return (
     <main className="min-h-screen bg-zinc-100 px-4 py-8 text-zinc-950 sm:px-6 lg:px-8">
-      <section className="mx-auto flex min-h-[calc(100vh-4rem)] max-w-3xl flex-col justify-center">
+      <section className="mx-auto flex max-w-5xl flex-col gap-6">
         <div className="rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-sm sm:p-8">
           <div className="mb-6">
             <p className="text-sm font-medium text-zinc-500">ClinicScribe</p>
             <h1 className="mt-2 text-2xl font-semibold tracking-normal text-zinc-950">
-              Realtime transcription prototype
+              Realtime transcription and note maker
             </h1>
           </div>
 
           <textarea
             className="min-h-72 w-full resize-none rounded-2xl border border-zinc-200 bg-zinc-50 p-4 text-base leading-7 text-zinc-900 shadow-inner outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100"
-            placeholder="Speech transcript will appear here..."
-            readOnly
+            onChange={(event) => setTranscript(event.target.value)}
+            placeholder="Vietnamese or English clinic transcript will appear here, or paste one for testing..."
             value={transcript}
           />
 
@@ -281,6 +371,124 @@ function App() {
               {isRecording ? "Stop recording" : "Start recording"}
             </button>
           </div>
+        </div>
+
+        <div className="rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-sm sm:p-8">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-xl font-semibold tracking-normal text-zinc-950">
+                Note maker
+              </h2>
+              <p className="mt-1 text-sm text-zinc-500">
+                Generate structured documentation from the transcript above.
+              </p>
+            </div>
+
+            <button
+              className="rounded-lg bg-zinc-950 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
+              disabled={
+                isGeneratingNote ||
+                isRecording ||
+                isProcessing ||
+                transcript.trim().length === 0
+              }
+              onClick={() => void generateNote()}
+              type="button"
+            >
+              {isGeneratingNote ? "Generating..." : "Generate note"}
+            </button>
+          </div>
+
+          {noteError ? (
+            <div className="mt-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+              {noteError}
+            </div>
+          ) : null}
+
+          {noteResult ? (
+            <div className="mt-6 space-y-6">
+              <section className="rounded-2xl border border-zinc-200 p-5">
+                <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                  <h3 className="text-lg font-semibold text-zinc-950">SOAP</h3>
+                  <p className="text-sm text-zinc-500">
+                    Language: {noteResult.language_detected || "Unknown"}
+                  </p>
+                </div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div>
+                    <p className="text-sm font-semibold text-zinc-900">Subjective</p>
+                    <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-zinc-700">
+                      {noteResult.soap.subjective || "Not documented."}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-sm font-semibold text-zinc-900">Objective</p>
+                    <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-zinc-700">
+                      {noteResult.soap.objective || "Not documented."}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-sm font-semibold text-zinc-900">Assessment</p>
+                    <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-zinc-700">
+                      {noteResult.soap.assessment || "Not documented."}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-sm font-semibold text-zinc-900">Plan</p>
+                    <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-zinc-700">
+                      {noteResult.soap.plan || "Not documented."}
+                    </p>
+                  </div>
+                </div>
+              </section>
+
+              <section className="rounded-2xl border border-zinc-200 p-5">
+                <h3 className="text-lg font-semibold text-zinc-950">Visit Summary</h3>
+                <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-zinc-700">
+                  {noteResult.visit_summary || "Not documented."}
+                </p>
+              </section>
+
+              <section className="rounded-2xl border border-zinc-200 p-5">
+                <h3 className="text-lg font-semibold text-zinc-950">Extracted Data</h3>
+                <div className="mt-4 grid gap-4 md:grid-cols-2">
+                  <div>
+                    <p className="mb-2 text-sm font-semibold text-zinc-900">Symptoms</p>
+                    {renderList(noteResult.extracted.symptoms)}
+                  </div>
+                  <div>
+                    <p className="mb-2 text-sm font-semibold text-zinc-900">Medications</p>
+                    {renderList(noteResult.extracted.medications)}
+                  </div>
+                  <div>
+                    <p className="mb-2 text-sm font-semibold text-zinc-900">
+                      Follow-up Plan
+                    </p>
+                    {renderList(noteResult.extracted.follow_up_plan)}
+                  </div>
+                  <div>
+                    <p className="mb-2 text-sm font-semibold text-zinc-900">Red Flags</p>
+                    {renderList(noteResult.extracted.red_flags)}
+                  </div>
+                  <div className="md:col-span-2">
+                    <p className="mb-2 text-sm font-semibold text-zinc-900">
+                      Uncertainties
+                    </p>
+                    {renderList(noteResult.uncertainties)}
+                  </div>
+                </div>
+              </section>
+
+              <section className="rounded-2xl border border-zinc-200 p-5">
+                <h3 className="text-lg font-semibold text-zinc-950">
+                  Discharge Instructions
+                </h3>
+                <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-zinc-700">
+                  {noteResult.discharge_instructions || "Not documented."}
+                </p>
+              </section>
+            </div>
+          ) : null}
         </div>
       </section>
     </main>
