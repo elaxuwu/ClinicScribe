@@ -1,4 +1,10 @@
 import { useEffect, useRef, useState } from "react";
+import {
+  createGuestSession,
+  persistGuestSession,
+  readGuestSession,
+  type GuestSession,
+} from "./guestSession";
 
 type TranscriptionSegment = {
   speaker?: string | number;
@@ -162,6 +168,9 @@ const renderList = (items: unknown) => {
 };
 
 function App() {
+  const [guestSession, setGuestSession] = useState<GuestSession>(
+    () => readGuestSession() ?? createGuestSession(),
+  );
   const [transcript, setTranscript] = useState("");
   const [status, setStatus] = useState("Ready");
   const [error, setError] = useState("");
@@ -182,6 +191,10 @@ function App() {
     chunksRef.current = [];
   };
 
+  const handleResetGuestSession = () => {
+    setGuestSession(createGuestSession());
+  };
+
   const transcribeAudio = async (audioBlob: Blob) => {
     setIsUploading(true);
     setStatus("Uploading audio");
@@ -193,6 +206,7 @@ function App() {
       });
 
       formData.set("audio", file);
+      formData.set("guestId", guestSession.id);
 
       const response = await fetch("/api/transcribe", {
         method: "POST",
@@ -346,7 +360,10 @@ function App() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ transcript }),
+        body: JSON.stringify({
+          transcript,
+          guestId: guestSession.id,
+        }),
       });
 
       const responseText = await response.text();
@@ -377,6 +394,10 @@ function App() {
   };
 
   useEffect(() => {
+    persistGuestSession(guestSession);
+  }, [guestSession]);
+
+  useEffect(() => {
     return cleanupRecording;
   }, []);
 
@@ -384,11 +405,28 @@ function App() {
     <main className="min-h-screen bg-zinc-100 px-4 py-8 text-zinc-950 sm:px-6 lg:px-8">
       <section className="mx-auto flex max-w-5xl flex-col gap-6">
         <div className="rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-sm sm:p-8">
-          <div className="mb-6">
-            <p className="text-sm font-medium text-zinc-500">ClinicScribe</p>
-            <h1 className="mt-2 text-2xl font-semibold tracking-normal text-zinc-950">
-              Speech-to-text prototype
-            </h1>
+          <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <p className="text-sm font-medium text-zinc-500">ClinicScribe</p>
+              <h1 className="mt-2 text-2xl font-semibold tracking-normal text-zinc-950">
+                Speech-to-text prototype
+              </h1>
+            </div>
+
+            <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm">
+              <p className="font-medium text-zinc-700">Current guest</p>
+              <p className="mt-1 text-zinc-950">{guestSession.displayName}</p>
+              <p className="mt-1 font-mono text-xs text-zinc-500">
+                {guestSession.id}
+              </p>
+              <button
+                className="mt-3 rounded-lg border border-zinc-300 px-3 py-2 text-xs font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-white"
+                onClick={handleResetGuestSession}
+                type="button"
+              >
+                Reset Guest Session
+              </button>
+            </div>
           </div>
 
           <textarea
