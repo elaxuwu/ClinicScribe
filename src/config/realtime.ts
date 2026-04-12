@@ -1,4 +1,4 @@
-export const REALTIME_MODEL = "Qwen/Qwen3.5-27B";
+export const REALTIME_MODEL = "recursal/QRWKV6-32B-Instruct-Preview-v0.1";
 export const REALTIME_VOICE = "Darok/tommy";
 
 export const TRANSCRIPTION_INSTRUCTIONS =
