@@ -2,6 +2,7 @@ interface Env {
   FEATHERLESS_API_KEY?: string;
   FEATHERLESS_BASE_URL?: string;
   FEATHERLESS_PROXY_BASE_URL?: string;
+  FEATHERLESS_PROXY_SHARED_SECRET?: string;
 }
 
 type NoteJson = {
@@ -254,6 +255,14 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
 
   const featherlessBaseUrl = getFeatherlessBaseUrl(env);
   const featherlessChatUrl = `${featherlessBaseUrl}${CHAT_COMPLETIONS_PATH}`;
+  const upstreamHeaders = new Headers({
+    Authorization: `Bearer ${env.FEATHERLESS_API_KEY}`,
+    "Content-Type": "application/json",
+  });
+
+  if (env.FEATHERLESS_PROXY_BASE_URL && env.FEATHERLESS_PROXY_SHARED_SECRET) {
+    upstreamHeaders.set("X-Internal-Proxy-Key", env.FEATHERLESS_PROXY_SHARED_SECRET);
+  }
 
   logInfo("Using Featherless endpoint", {
     endpoint: featherlessChatUrl,
@@ -264,10 +273,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   try {
     const upstreamResponse = await fetchTextWithNetworkRetries(featherlessChatUrl, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.FEATHERLESS_API_KEY}`,
-        "Content-Type": "application/json",
-      },
+      headers: upstreamHeaders,
       body: JSON.stringify({
         model: NOTE_MODEL,
         temperature: 0.1,
