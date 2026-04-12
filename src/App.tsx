@@ -15,6 +15,7 @@ type TranscriptionResponse = {
 
 type NoteResult = {
   language_detected?: unknown;
+  provider_used?: unknown;
   soap?: {
     subjective?: unknown;
     objective?: unknown;
@@ -129,6 +130,18 @@ const asStringArray = (value: unknown) =>
   Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string")
     : [];
+
+const getProviderLabel = (value: unknown) => {
+  if (value === "featherless") {
+    return "Featherless";
+  }
+
+  if (value === "ollama") {
+    return "Ollama fallback";
+  }
+
+  return "";
+};
 
 const renderList = (items: unknown) => {
   const values = asStringArray(items);
@@ -448,9 +461,12 @@ function App() {
               <section className="rounded-2xl border border-zinc-200 p-5">
                 <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
                   <h3 className="text-lg font-semibold text-zinc-950">SOAP</h3>
-                  <p className="text-sm text-zinc-500">
-                    Language: {asText(noteResult.language_detected)}
-                  </p>
+                  <div className="text-sm text-zinc-500 sm:text-right">
+                    <p>Language: {asText(noteResult.language_detected)}</p>
+                    {getProviderLabel(noteResult.provider_used) ? (
+                      <p>Provider: {getProviderLabel(noteResult.provider_used)}</p>
+                    ) : null}
+                  </div>
                 </div>
 
                 <div className="grid gap-4 md:grid-cols-2">

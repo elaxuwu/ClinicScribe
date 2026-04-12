@@ -1,9 +1,12 @@
 interface Env {
   FEATHERLESS_API_KEY?: string;
   FEATHERLESS_BASE_URL?: string;
-  FEATHERLESS_PROXY_BASE_URL?: string;
-  FEATHERLESS_PROXY_SHARED_SECRET?: string;
+  FEATHERLESS_MODEL?: string;
+  OLLAMA_API_KEY?: string;
+  OLLAMA_MODEL?: string;
 }
+
+type ProviderUsed = "featherless" | "ollama";
 
 type NoteJson = {
   language_detected: string;
@@ -22,22 +25,39 @@ type NoteJson = {
   };
   discharge_instructions: string;
   uncertainties: string[];
+  provider_used: ProviderUsed;
 };
 
-type FeatherlessEndpoint = {
-  baseUrl: string;
-  chatUrl: string;
-  usingProxy: boolean;
+type ChatMessage = {
+  role: "system" | "user";
+  content: string;
 };
 
-const NOTE_MODEL = "Qwen/Qwen3-32B";
-const DEFAULT_FEATHERLESS_BASE_URL = "https://api.featherless.ai/v1";
+type ProviderErrorKind =
+  | "config"
+  | "network"
+  | "timeout"
+  | "http"
+  | "malformed-json"
+  | "missing-content"
+  | "invalid-note-json";
+
+type ProviderFailure = {
+  provider: ProviderUsed;
+  message: string;
+  kind?: ProviderErrorKind;
+  status?: number;
+  details?: unknown;
+  body_preview?: string;
+};
+
 const CHAT_COMPLETIONS_PATH = "/chat/completions";
-const MODELS_PATH = "/models";
+const OLLAMA_CHAT_URL = "https://ollama.com/api/chat";
 const MAX_TRANSCRIPT_CHARS = 30000;
 const MAX_FEATHERLESS_ATTEMPTS = 3;
 const MAX_NOTE_COMPLETION_ATTEMPTS = 2;
 const NOTE_MAX_TOKENS = 4000;
+const UPSTREAM_TIMEOUT_MS = 20000;
 
 const SYSTEM_PROMPT = `You are a multilingual medical scribe for clinics.
 Faithfully transform transcript text into structured clinical documentation.
@@ -70,6 +90,30 @@ The JSON schema must be exactly:
   "uncertainties": ["string"]
 }`;
 
+class ProviderRequestError extends Error {
+  kind: ProviderErrorKind;
+  status?: number;
+  details?: unknown;
+  bodyPreview?: string;
+
+  constructor(
+    message: string,
+    options: {
+      kind: ProviderErrorKind;
+      status?: number;
+      details?: unknown;
+      bodyPreview?: string;
+    },
+  ) {
+    super(message);
+    this.name = "ProviderRequestError";
+    this.kind = options.kind;
+    this.status = options.status;
+    this.details = options.details;
+    this.bodyPreview = options.bodyPreview;
+  }
+}
+
 const jsonHeaders = {
   "Content-Type": "application/json",
 };
@@ -90,32 +134,16 @@ const sleep = (ms: number) =>
 
 const normalizeBaseUrl = (url: string) => url.trim().replace(/\/+$/, "");
 
-const getDirectFeatherlessBaseUrl = (env: Env) =>
-  normalizeBaseUrl(env.FEATHERLESS_BASE_URL || DEFAULT_FEATHERLESS_BASE_URL);
+const getRequiredEnv = (env: Env, name: keyof Env) => {
+  const value = env[name]?.trim();
 
-const getFeatherlessEndpoints = (env: Env): FeatherlessEndpoint[] => {
-  const directBaseUrl = getDirectFeatherlessBaseUrl(env);
-
-  return [
-    {
-      baseUrl: directBaseUrl,
-      chatUrl: `${directBaseUrl}${CHAT_COMPLETIONS_PATH}`,
-      usingProxy: false,
-    },
-  ];
-};
-
-const createUpstreamHeaders = (env: Env, usingProxy: boolean) => {
-  const headers = new Headers({
-    Authorization: `Bearer ${env.FEATHERLESS_API_KEY}`,
-    "Content-Type": "application/json",
-  });
-
-  if (usingProxy && env.FEATHERLESS_PROXY_SHARED_SECRET) {
-    headers.set("X-Internal-Proxy-Key", env.FEATHERLESS_PROXY_SHARED_SECRET);
+  if (!value) {
+    throw new ProviderRequestError(`Missing ${name} environment variable.`, {
+      kind: "config",
+    });
   }
 
-  return headers;
+  return value;
 };
 
 const getErrorMessage = (error: unknown) =>
@@ -129,7 +157,140 @@ const logError = (message: string, data?: Record<string, unknown>) => {
   console.error(`[make-note] ${message}`, data ?? {});
 };
 
-const fetchTextWithNetworkRetries = async (url: string, init: RequestInit) => {
+const asRecord = (value: unknown) =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+
+const getUpstreamErrorDetails = (value: unknown) => {
+  const response = asRecord(value);
+
+  if (typeof response?.error === "string") {
+    return response.error;
+  }
+
+  const error = asRecord(response?.error);
+
+  return typeof error?.message === "string" ? error.message : value;
+};
+
+const safeJsonParse = (text: string) => {
+  try {
+    return {
+      ok: true as const,
+      json: JSON.parse(text) as unknown,
+    };
+  } catch (error) {
+    return {
+      ok: false as const,
+      error,
+    };
+  }
+};
+
+const fetchTextWithTimeout = async (
+  providerName: string,
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+) => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+    const text = await response.text();
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      text,
+    };
+  } catch (error) {
+    const isAbort =
+      error instanceof DOMException
+        ? error.name === "AbortError"
+        : getErrorMessage(error).includes("aborted");
+
+    throw new ProviderRequestError(
+      isAbort
+        ? `${providerName} timed out after ${timeoutMs / 1000} seconds.`
+        : `${providerName} network request failed.`,
+      {
+        kind: isAbort ? "timeout" : "network",
+        details: getErrorMessage(error),
+      },
+    );
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
+const fetchJsonWithTimeout = async (
+  providerName: string,
+  url: string,
+  init: RequestInit,
+) => {
+  const response = await fetchTextWithTimeout(
+    providerName,
+    url,
+    init,
+    UPSTREAM_TIMEOUT_MS,
+  );
+  const parsed = safeJsonParse(response.text);
+
+  if (!response.ok) {
+    throw new ProviderRequestError(
+      `${providerName} returned HTTP ${response.status}.`,
+      {
+        kind: "http",
+        status: response.status,
+        details: parsed.ok
+          ? getUpstreamErrorDetails(parsed.json)
+          : response.text.slice(0, 500),
+        bodyPreview: response.text.slice(0, 500),
+      },
+    );
+  }
+
+  if (!parsed.ok) {
+    throw new ProviderRequestError(`${providerName} returned malformed JSON.`, {
+      kind: "malformed-json",
+      status: response.status,
+      details: getErrorMessage(parsed.error),
+      bodyPreview: response.text.slice(0, 500),
+    });
+  }
+
+  return parsed.json;
+};
+
+const isTransientFeatherlessError = (error: unknown) => {
+  if (!(error instanceof ProviderRequestError)) {
+    return true;
+  }
+
+  if (
+    error.kind === "network" ||
+    error.kind === "timeout" ||
+    error.kind === "malformed-json"
+  ) {
+    return true;
+  }
+
+  return (
+    error.kind === "http" &&
+    (error.status === 408 || error.status === 429 || (error.status ?? 0) >= 500)
+  );
+};
+
+const fetchFeatherlessJsonWithRetries = async (
+  url: string,
+  init: RequestInit,
+) => {
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= MAX_FEATHERLESS_ATTEMPTS; attempt += 1) {
@@ -140,125 +301,38 @@ const fetchTextWithNetworkRetries = async (url: string, init: RequestInit) => {
     });
 
     try {
-      const response = await fetch(url, init);
+      const json = await fetchJsonWithTimeout("Featherless", url, init);
+
       logInfo("Featherless response received", {
         endpoint: url,
         attempt,
-        status: response.status,
       });
 
-      const text = await response.text();
-      return {
-        ok: response.ok,
-        status: response.status,
-        text,
-      };
+      return json;
     } catch (error) {
       lastError = error;
-      logError("Featherless fetch/network error", {
+
+      logError("Featherless request attempt failed", {
         endpoint: url,
         attempt,
+        maxAttempts: MAX_FEATHERLESS_ATTEMPTS,
         message: getErrorMessage(error),
+        kind: error instanceof ProviderRequestError ? error.kind : undefined,
+        status: error instanceof ProviderRequestError ? error.status : undefined,
       });
 
-      if (attempt < MAX_FEATHERLESS_ATTEMPTS) {
+      if (attempt < MAX_FEATHERLESS_ATTEMPTS && isTransientFeatherlessError(error)) {
         await sleep(250 * 2 ** (attempt - 1));
+        continue;
       }
+
+      throw error;
     }
   }
 
   throw lastError instanceof Error
     ? lastError
     : new Error("Featherless request failed without a response.");
-};
-
-const fetchJsonWithRetries = async (
-  url: string,
-  init: RequestInit,
-): Promise<{
-  ok: boolean;
-  status: number;
-  json: unknown;
-  text: string;
-}> => {
-  let lastStatus = 0;
-  let lastText = "";
-
-  for (let attempt = 1; attempt <= MAX_FEATHERLESS_ATTEMPTS; attempt += 1) {
-    const response = await fetchTextWithNetworkRetries(url, init);
-    lastStatus = response.status;
-    lastText = response.text;
-
-    try {
-      return {
-        ok: response.ok,
-        status: response.status,
-        json: JSON.parse(response.text) as unknown,
-        text: response.text,
-      };
-    } catch (error) {
-      logError("Featherless returned malformed JSON", {
-        endpoint: url,
-        attempt,
-        status: response.status,
-        message: getErrorMessage(error),
-        bodyPreview: response.text.slice(0, 300),
-      });
-
-      if (attempt < MAX_FEATHERLESS_ATTEMPTS) {
-        await sleep(250 * 2 ** (attempt - 1));
-      }
-    }
-  }
-
-  throw new Error(
-    `Malformed JSON from Featherless after ${MAX_FEATHERLESS_ATTEMPTS} attempts. Last status: ${lastStatus}. Preview: ${lastText.slice(0, 300)}`,
-  );
-};
-
-// Temporary runtime connectivity check when debugging Cloudflare reachability:
-// fetch(`${getDirectFeatherlessBaseUrl(env)}${MODELS_PATH}`, {
-//   headers: { Authorization: `Bearer ${env.FEATHERLESS_API_KEY}` },
-// });
-
-const parseModelJson = (content: string): unknown => {
-  const trimmed = content
-    .trim()
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```$/i, "");
-
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    const firstBrace = trimmed.indexOf("{");
-    const lastBrace = trimmed.lastIndexOf("}");
-
-    if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
-      throw new Error("The model did not return a JSON object.");
-    }
-
-    return JSON.parse(trimmed.slice(firstBrace, lastBrace + 1));
-  }
-};
-
-const toStringValue = (value: unknown) =>
-  typeof value === "string" ? value : "";
-
-const toStringArray = (value: unknown) =>
-  Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string")
-    : [];
-
-const asRecord = (value: unknown) =>
-  value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-
-const getUpstreamErrorDetails = (value: unknown) => {
-  const response = asRecord(value);
-  const error = asRecord(response?.error);
-
-  return typeof error?.message === "string" ? error.message : value;
 };
 
 const getTextFromContentPart = (value: unknown) => {
@@ -279,6 +353,41 @@ const getTextFromContentPart = (value: unknown) => {
   const nestedText = asRecord(part.text);
 
   return typeof nestedText?.value === "string" ? nestedText.value : null;
+};
+
+const getOpenAiChatContent = (value: unknown) => {
+  const response = asRecord(value);
+  const choices = response?.choices;
+
+  if (!Array.isArray(choices)) {
+    return null;
+  }
+
+  const choice = asRecord(choices[0]);
+  const message = asRecord(choice?.message);
+  const content = message?.content;
+
+  if (typeof content === "string") {
+    return content.trim() ? content : null;
+  }
+
+  if (!Array.isArray(content)) {
+    return null;
+  }
+
+  const textParts = content
+    .map(getTextFromContentPart)
+    .filter((part): part is string => typeof part === "string" && part.length > 0);
+
+  return textParts.length > 0 ? textParts.join("\n") : null;
+};
+
+const getOllamaChatContent = (value: unknown) => {
+  const response = asRecord(value);
+  const message = asRecord(response?.message);
+  const content = message?.content;
+
+  return typeof content === "string" && content.trim() ? content : null;
 };
 
 const getFeatherlessResponseSummary = (value: unknown) => {
@@ -308,53 +417,49 @@ const getFeatherlessResponseSummary = (value: unknown) => {
   };
 };
 
-const getModelContent = (value: unknown) => {
+const getOllamaResponseSummary = (value: unknown) => {
   const response = asRecord(value);
-  const choices = response?.choices;
-
-  if (!Array.isArray(choices)) {
-    return null;
-  }
-
-  const [firstChoice] = choices;
-  const choice = asRecord(firstChoice);
-  const message = asRecord(choice?.message);
+  const message = asRecord(response?.message);
   const content = message?.content;
 
-  if (typeof content === "string") {
-    return content.trim() ? content : null;
-  }
-
-  if (!Array.isArray(content)) {
-    return null;
-  }
-
-  const textParts = content
-    .map(getTextFromContentPart)
-    .filter((part): part is string => typeof part === "string" && part.length > 0);
-
-  return textParts.length > 0 ? textParts.join("\n") : null;
+  return {
+    model: typeof response?.model === "string" ? response.model : undefined,
+    done: typeof response?.done === "boolean" ? response.done : undefined,
+    done_reason:
+      typeof response?.done_reason === "string" ? response.done_reason : undefined,
+    content_length: typeof content === "string" ? content.length : undefined,
+  };
 };
 
-const createNoteCompletionBody = (trimmedTranscript: string) => ({
-  model: NOTE_MODEL,
-  temperature: 0,
-  max_tokens: NOTE_MAX_TOKENS,
-  messages: [
-    { role: "system", content: SYSTEM_PROMPT },
-    {
-      role: "user",
-      content: [
-        "Create the clinical note JSON from this transcript.",
-        "Return only the final JSON object. Do not include analysis or reasoning.",
-        "",
-        trimmedTranscript,
-      ].join("\n"),
-    },
-  ],
-});
+const parseModelJson = (content: string): unknown => {
+  const trimmed = content
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "");
 
-const normalizeNoteJson = (value: unknown): NoteJson => {
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    const firstBrace = trimmed.indexOf("{");
+    const lastBrace = trimmed.lastIndexOf("}");
+
+    if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
+      throw new Error("The model did not return a JSON object.");
+    }
+
+    return JSON.parse(trimmed.slice(firstBrace, lastBrace + 1));
+  }
+};
+
+const toStringValue = (value: unknown) =>
+  typeof value === "string" ? value : "";
+
+const toStringArray = (value: unknown) =>
+  Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+
+const normalizeNoteJson = (value: unknown, providerUsed: ProviderUsed): NoteJson => {
   const source =
     value && typeof value === "object" ? (value as Record<string, unknown>) : {};
   const soap =
@@ -383,17 +488,202 @@ const normalizeNoteJson = (value: unknown): NoteJson => {
     },
     discharge_instructions: toStringValue(source.discharge_instructions),
     uncertainties: toStringArray(source.uncertainties),
+    provider_used: providerUsed,
+  };
+};
+
+const createMessages = (trimmedTranscript: string): ChatMessage[] => [
+  { role: "system", content: SYSTEM_PROMPT },
+  {
+    role: "user",
+    content: [
+      "Create the clinical note JSON from this transcript.",
+      "Return only the final JSON object. Do not include analysis or reasoning.",
+      "",
+      trimmedTranscript,
+    ].join("\n"),
+  },
+];
+
+const createFeatherlessCompletionBody = (
+  model: string,
+  trimmedTranscript: string,
+) => ({
+  model,
+  temperature: 0,
+  max_tokens: NOTE_MAX_TOKENS,
+  messages: createMessages(trimmedTranscript),
+});
+
+const createOllamaChatBody = (model: string, trimmedTranscript: string) => ({
+  model,
+  stream: false,
+  options: {
+    temperature: 0,
+    num_predict: NOTE_MAX_TOKENS,
+  },
+  messages: createMessages(trimmedTranscript),
+});
+
+const wrapInvalidNoteJson = (
+  providerName: string,
+  error: unknown,
+  modelContent: string,
+) =>
+  new ProviderRequestError(
+    `${providerName} model response could not be parsed as valid note JSON.`,
+    {
+      kind: "invalid-note-json",
+      details: getErrorMessage(error),
+      bodyPreview: modelContent.slice(0, 500),
+    },
+  );
+
+const shouldRetryNoteCompletion = (error: unknown) =>
+  error instanceof ProviderRequestError &&
+  (error.kind === "missing-content" || error.kind === "invalid-note-json");
+
+const generateWithFeatherless = async (
+  env: Env,
+  trimmedTranscript: string,
+): Promise<NoteJson> => {
+  const apiKey = getRequiredEnv(env, "FEATHERLESS_API_KEY");
+  const baseUrl = normalizeBaseUrl(getRequiredEnv(env, "FEATHERLESS_BASE_URL"));
+  const model = getRequiredEnv(env, "FEATHERLESS_MODEL");
+  const chatUrl = `${baseUrl}${CHAT_COMPLETIONS_PATH}`;
+  let lastError: unknown;
+
+  logInfo("Using Featherless primary provider", {
+    endpoint: chatUrl,
+    model,
+  });
+
+  for (
+    let completionAttempt = 1;
+    completionAttempt <= MAX_NOTE_COMPLETION_ATTEMPTS;
+    completionAttempt += 1
+  ) {
+    try {
+      const upstreamJson = await fetchFeatherlessJsonWithRetries(chatUrl, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(
+          createFeatherlessCompletionBody(model, trimmedTranscript),
+        ),
+      });
+
+      const modelContent = getOpenAiChatContent(upstreamJson);
+      const responseSummary = getFeatherlessResponseSummary(upstreamJson);
+
+      if (!modelContent) {
+        throw new ProviderRequestError(
+          "Featherless response did not include final note content.",
+          {
+            kind: "missing-content",
+            details: responseSummary,
+          },
+        );
+      }
+
+      try {
+        return normalizeNoteJson(parseModelJson(modelContent), "featherless");
+      } catch (error) {
+        throw wrapInvalidNoteJson("Featherless", error, modelContent);
+      }
+    } catch (error) {
+      lastError = error;
+
+      logError("Featherless note-generation attempt failed", {
+        completionAttempt,
+        maxCompletionAttempts: MAX_NOTE_COMPLETION_ATTEMPTS,
+        message: getErrorMessage(error),
+        kind: error instanceof ProviderRequestError ? error.kind : undefined,
+        status: error instanceof ProviderRequestError ? error.status : undefined,
+      });
+
+      if (
+        completionAttempt < MAX_NOTE_COMPLETION_ATTEMPTS &&
+        shouldRetryNoteCompletion(error)
+      ) {
+        await sleep(250 * completionAttempt);
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Featherless failed without an error.");
+};
+
+const generateWithOllama = async (
+  env: Env,
+  trimmedTranscript: string,
+): Promise<NoteJson> => {
+  const apiKey = getRequiredEnv(env, "OLLAMA_API_KEY");
+  const model = getRequiredEnv(env, "OLLAMA_MODEL");
+
+  logInfo("Using Ollama Cloud fallback provider", {
+    endpoint: OLLAMA_CHAT_URL,
+    model,
+  });
+
+  const upstreamJson = await fetchJsonWithTimeout("Ollama Cloud", OLLAMA_CHAT_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(createOllamaChatBody(model, trimmedTranscript)),
+  });
+
+  const modelContent = getOllamaChatContent(upstreamJson);
+  const responseSummary = getOllamaResponseSummary(upstreamJson);
+
+  if (!modelContent) {
+    throw new ProviderRequestError(
+      "Ollama Cloud response did not include final note content.",
+      {
+        kind: "missing-content",
+        details: responseSummary,
+      },
+    );
+  }
+
+  try {
+    return normalizeNoteJson(parseModelJson(modelContent), "ollama");
+  } catch (error) {
+    throw wrapInvalidNoteJson("Ollama Cloud", error, modelContent);
+  }
+};
+
+const summarizeProviderFailure = (
+  provider: ProviderUsed,
+  error: unknown,
+): ProviderFailure => {
+  if (error instanceof ProviderRequestError) {
+    return {
+      provider,
+      message: error.message,
+      kind: error.kind,
+      status: error.status,
+      details: error.details,
+      body_preview: error.bodyPreview,
+    };
+  }
+
+  return {
+    provider,
+    message: getErrorMessage(error),
   };
 };
 
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
-  if (!env.FEATHERLESS_API_KEY) {
-    return jsonResponse(
-      { error: "Missing FEATHERLESS_API_KEY environment variable." },
-      { status: 500 },
-    );
-  }
-
   let body: unknown;
 
   try {
@@ -424,210 +714,34 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     );
   }
 
-  const featherlessEndpoints = getFeatherlessEndpoints(env);
-  const primaryEndpoint = featherlessEndpoints[0];
-  let lastAttemptedEndpoint = primaryEndpoint;
-  let previousProxyFailure:
-    | {
-        endpoint: string;
-        status?: number;
-        details: unknown;
-      }
-    | undefined;
-
-  logInfo("Using Featherless endpoint", {
-    endpoint: primaryEndpoint.chatUrl,
-    fallbackEndpoint: featherlessEndpoints[1]?.chatUrl,
-    connectivityCheck: `${primaryEndpoint.baseUrl}${MODELS_PATH}`,
-    usingProxy: primaryEndpoint.usingProxy,
-  });
-
   try {
-    let emptyResponseSummary: ReturnType<
-      typeof getFeatherlessResponseSummary
-    > | null = null;
-
-    completionLoop: for (
-      let completionAttempt = 1;
-      completionAttempt <= MAX_NOTE_COMPLETION_ATTEMPTS;
-      completionAttempt += 1
-    ) {
-      const requestBody = JSON.stringify(createNoteCompletionBody(trimmedTranscript));
-
-      for (
-        let endpointIndex = 0;
-        endpointIndex < featherlessEndpoints.length;
-        endpointIndex += 1
-      ) {
-        const endpoint = featherlessEndpoints[endpointIndex];
-        const hasFallbackEndpoint = endpointIndex < featherlessEndpoints.length - 1;
-        lastAttemptedEndpoint = endpoint;
-
-        let upstreamResponse: Awaited<ReturnType<typeof fetchJsonWithRetries>>;
-
-        try {
-          upstreamResponse = await fetchJsonWithRetries(endpoint.chatUrl, {
-            method: "POST",
-            headers: createUpstreamHeaders(env, endpoint.usingProxy),
-            body: requestBody,
-          });
-        } catch (error) {
-          const details = getErrorMessage(error);
-
-          if (endpoint.usingProxy) {
-            previousProxyFailure = {
-              endpoint: endpoint.chatUrl,
-              details,
-            };
-          }
-
-          logError("Featherless endpoint request failed", {
-            endpoint: endpoint.chatUrl,
-            completionAttempt,
-            details,
-            usingProxy: endpoint.usingProxy,
-          });
-
-          if (endpoint.usingProxy && hasFallbackEndpoint) {
-            logInfo("Retrying Featherless request without proxy", {
-              failedEndpoint: endpoint.chatUrl,
-              fallbackEndpoint: featherlessEndpoints[endpointIndex + 1].chatUrl,
-              completionAttempt,
-            });
-            continue;
-          }
-
-          throw error;
-        }
-
-        if (!upstreamResponse.ok) {
-          const details = getUpstreamErrorDetails(upstreamResponse.json);
-
-          if (endpoint.usingProxy) {
-            previousProxyFailure = {
-              endpoint: endpoint.chatUrl,
-              status: upstreamResponse.status,
-              details,
-            };
-          }
-
-          logError("Featherless returned non-2xx status", {
-            endpoint: endpoint.chatUrl,
-            status: upstreamResponse.status,
-            details,
-            usingProxy: endpoint.usingProxy,
-          });
-
-          if (endpoint.usingProxy && hasFallbackEndpoint) {
-            logInfo("Retrying Featherless request without proxy", {
-              failedEndpoint: endpoint.chatUrl,
-              fallbackEndpoint: featherlessEndpoints[endpointIndex + 1].chatUrl,
-              completionAttempt,
-            });
-            continue;
-          }
-
-          return jsonResponse(
-            {
-              error: "Failed to generate note with Featherless.",
-              endpoint: endpoint.chatUrl,
-              status: upstreamResponse.status,
-              details,
-              previousProxyFailure,
-            },
-            { status: upstreamResponse.status },
-          );
-        }
-
-        const modelContent = getModelContent(upstreamResponse.json);
-        const responseSummary = getFeatherlessResponseSummary(upstreamResponse.json);
-
-        if (!modelContent) {
-          emptyResponseSummary = responseSummary;
-          logError("Featherless response did not include final note content", {
-            endpoint: endpoint.chatUrl,
-            completionAttempt,
-            maxCompletionAttempts: MAX_NOTE_COMPLETION_ATTEMPTS,
-            response: responseSummary,
-          });
-
-          if (endpoint.usingProxy && hasFallbackEndpoint) {
-            logInfo("Retrying empty Featherless response without proxy", {
-              failedEndpoint: endpoint.chatUrl,
-              fallbackEndpoint: featherlessEndpoints[endpointIndex + 1].chatUrl,
-              completionAttempt,
-            });
-            continue;
-          }
-
-          if (completionAttempt < MAX_NOTE_COMPLETION_ATTEMPTS) {
-            await sleep(250 * completionAttempt);
-            continue completionLoop;
-          }
-
-          break completionLoop;
-        }
-
-        try {
-          const parsedNote = parseModelJson(modelContent);
-          return jsonResponse(normalizeNoteJson(parsedNote));
-        } catch (error) {
-          const details =
-            error instanceof Error ? error.message : "Unknown parse error";
-
-          logError("The model response could not be parsed as valid JSON", {
-            endpoint: endpoint.chatUrl,
-            completionAttempt,
-            maxCompletionAttempts: MAX_NOTE_COMPLETION_ATTEMPTS,
-            details,
-            response: responseSummary,
-            rawPreview: modelContent.slice(0, 300),
-          });
-
-          if (completionAttempt < MAX_NOTE_COMPLETION_ATTEMPTS) {
-            await sleep(250 * completionAttempt);
-            continue completionLoop;
-          }
-
-          return jsonResponse(
-            {
-              error: "The model response could not be parsed as valid JSON.",
-              details,
-              response: responseSummary,
-              raw: modelContent.slice(0, 1000),
-            },
-            { status: 502 },
-          );
-        }
-      }
-    }
-
-    return jsonResponse(
-      {
-        error: "Featherless did not return final note JSON.",
-        details:
-          "The model stopped before producing message content. Try again, or use a non-reasoning note model if this repeats.",
-        response: emptyResponseSummary,
-      },
-      { status: 502 },
+    return jsonResponse(await generateWithFeatherless(env, trimmedTranscript));
+  } catch (featherlessError) {
+    const featherlessFailure = summarizeProviderFailure(
+      "featherless",
+      featherlessError,
     );
-  } catch (error) {
-    logError("Featherless request failed after retries", {
-      endpoint: lastAttemptedEndpoint.chatUrl,
-      attempts: MAX_FEATHERLESS_ATTEMPTS,
-      details: getErrorMessage(error),
-      previousProxyFailure,
+
+    logError("Featherless failure", featherlessFailure);
+    logInfo("Activating Ollama Cloud fallback", {
+      reason: featherlessFailure.message,
     });
 
-    return jsonResponse(
-      {
-        error: "Unable to reach Featherless chat completions endpoint.",
-        endpoint: lastAttemptedEndpoint.chatUrl,
-        attempts: MAX_FEATHERLESS_ATTEMPTS,
-        details: getErrorMessage(error),
-        previousProxyFailure,
-      },
-      { status: 502 },
-    );
+    try {
+      return jsonResponse(await generateWithOllama(env, trimmedTranscript));
+    } catch (ollamaError) {
+      const ollamaFailure = summarizeProviderFailure("ollama", ollamaError);
+
+      logError("Ollama Cloud fallback failure", ollamaFailure);
+
+      return jsonResponse(
+        {
+          error:
+            "Unable to generate note. Featherless primary and Ollama Cloud fallback both failed.",
+          failures: [featherlessFailure, ollamaFailure],
+        },
+        { status: 502 },
+      );
+    }
   }
 };
