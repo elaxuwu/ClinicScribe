@@ -321,6 +321,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
       body: JSON.stringify({
         model: NOTE_MODEL,
         temperature: 0.1,
+        max_tokens: 1200,
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
