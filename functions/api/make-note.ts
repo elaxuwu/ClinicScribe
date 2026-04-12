@@ -79,7 +79,10 @@ const jsonResponse = (body: unknown, init?: ResponseInit) =>
   });
 
 const parseModelJson = (content: string): unknown => {
-  const trimmed = content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
+  const trimmed = content
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "");
 
   try {
     return JSON.parse(trimmed);
@@ -99,11 +102,17 @@ const toStringValue = (value: unknown) =>
   typeof value === "string" ? value : "";
 
 const toStringArray = (value: unknown) =>
-  Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+  Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
 
 const normalizeNoteJson = (value: unknown): NoteJson => {
-  const source = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
-  const soap = source.soap && typeof source.soap === "object" ? (source.soap as Record<string, unknown>) : {};
+  const source =
+    value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  const soap =
+    source.soap && typeof source.soap === "object"
+      ? (source.soap as Record<string, unknown>)
+      : {};
   const extracted =
     source.extracted && typeof source.extracted === "object"
       ? (source.extracted as Record<string, unknown>)
