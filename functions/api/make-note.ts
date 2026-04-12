@@ -150,6 +150,50 @@ const fetchTextWithNetworkRetries = async (url: string, init: RequestInit) => {
     : new Error("Featherless request failed without a response.");
 };
 
+const fetchJsonWithRetries = async (
+  url: string,
+  init: RequestInit,
+): Promise<{
+  ok: boolean;
+  status: number;
+  json: FeatherlessChatResponse;
+  text: string;
+}> => {
+  let lastStatus = 0;
+  let lastText = "";
+
+  for (let attempt = 1; attempt <= MAX_FEATHERLESS_ATTEMPTS; attempt += 1) {
+    const response = await fetchTextWithNetworkRetries(url, init);
+    lastStatus = response.status;
+    lastText = response.text;
+
+    try {
+      return {
+        ok: response.ok,
+        status: response.status,
+        json: JSON.parse(response.text) as FeatherlessChatResponse,
+        text: response.text,
+      };
+    } catch (error) {
+      logError("Featherless returned malformed JSON", {
+        endpoint: url,
+        attempt,
+        status: response.status,
+        message: getErrorMessage(error),
+        bodyPreview: response.text.slice(0, 300),
+      });
+
+      if (attempt < MAX_FEATHERLESS_ATTEMPTS) {
+        await sleep(250 * 2 ** (attempt - 1));
+      }
+    }
+  }
+
+  throw new Error(
+    `Malformed JSON from Featherless after ${MAX_FEATHERLESS_ATTEMPTS} attempts. Last status: ${lastStatus}. Preview: ${lastText.slice(0, 300)}`,
+  );
+};
+
 // Temporary runtime connectivity check when debugging Cloudflare reachability:
 // fetch(`${getFeatherlessBaseUrl(env)}${MODELS_PATH}`, {
 //   headers: { Authorization: `Bearer ${env.FEATHERLESS_API_KEY}` },
@@ -271,7 +315,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   });
 
   try {
-    const upstreamResponse = await fetchTextWithNetworkRetries(featherlessChatUrl, {
+    const upstreamResponse = await fetchJsonWithRetries(featherlessChatUrl, {
       method: "POST",
       headers: upstreamHeaders,
       body: JSON.stringify({
@@ -288,34 +332,11 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
       }),
     });
 
-    //hello
-    let upstreamJson: FeatherlessChatResponse;
-
-    try {
-      upstreamJson = JSON.parse(upstreamResponse.text) as FeatherlessChatResponse;
-    } catch {
-      logError("Featherless returned malformed JSON", {
-        endpoint: featherlessChatUrl,
-        status: upstreamResponse.status,
-        bodyPreview: upstreamResponse.text.slice(0, 300),
-      });
-
-      return jsonResponse(
-        {
-          error: "Featherless returned a non-JSON response.",
-          endpoint: featherlessChatUrl,
-          status: upstreamResponse.status,
-          details: upstreamResponse.text.slice(0, 500),
-        },
-        { status: 502 },
-      );
-    }
-
     if (!upstreamResponse.ok) {
       logError("Featherless returned non-2xx status", {
         endpoint: featherlessChatUrl,
         status: upstreamResponse.status,
-        details: upstreamJson.error?.message ?? upstreamJson,
+        details: upstreamResponse.json.error?.message ?? upstreamResponse.json,
       });
 
       return jsonResponse(
@@ -323,13 +344,13 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
           error: "Failed to generate note with Featherless.",
           endpoint: featherlessChatUrl,
           status: upstreamResponse.status,
-          details: upstreamJson.error?.message ?? upstreamJson,
+          details: upstreamResponse.json.error?.message ?? upstreamResponse.json,
         },
         { status: upstreamResponse.status },
       );
     }
 
-    const modelContent = upstreamJson.choices?.[0]?.message?.content;
+    const modelContent = upstreamResponse.json.choices?.[0]?.message?.content;
 
     if (!modelContent) {
       return jsonResponse(
