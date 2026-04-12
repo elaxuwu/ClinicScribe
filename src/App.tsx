@@ -261,7 +261,7 @@ function App() {
 
           <textarea
             className="min-h-72 w-full resize-none rounded-2xl border border-zinc-200 bg-zinc-50 p-4 text-base leading-7 text-zinc-900 shadow-inner outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100"
-            placeholder="Vietnamese speech transcript will appear here..."
+            placeholder="Speech transcript will appear here..."
             readOnly
             value={transcript}
           />
