@@ -347,7 +347,6 @@ const createNoteCompletionBody = (trimmedTranscript: string) => ({
       content: [
         "Create the clinical note JSON from this transcript.",
         "Return only the final JSON object. Do not include analysis or reasoning.",
-        "Use non-thinking mode if supported. /no_think",
         "",
         trimmedTranscript,
       ].join("\n"),
