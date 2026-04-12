@@ -24,6 +24,12 @@ type NoteJson = {
   uncertainties: string[];
 };
 
+type FeatherlessEndpoint = {
+  baseUrl: string;
+  chatUrl: string;
+  usingProxy: boolean;
+};
+
 const NOTE_MODEL = "Qwen/Qwen3.5-27B";
 const DEFAULT_FEATHERLESS_BASE_URL = "https://api.featherless.ai/v1";
 const CHAT_COMPLETIONS_PATH = "/chat/completions";
@@ -82,12 +88,49 @@ const sleep = (ms: number) =>
     setTimeout(resolve, ms);
   });
 
-const getFeatherlessBaseUrl = (env: Env) =>
-  (env.FEATHERLESS_PROXY_BASE_URL ||
-    env.FEATHERLESS_BASE_URL ||
-    DEFAULT_FEATHERLESS_BASE_URL)
-    .trim()
-    .replace(/\/+$/, "");
+const normalizeBaseUrl = (url: string) => url.trim().replace(/\/+$/, "");
+
+const getDirectFeatherlessBaseUrl = (env: Env) =>
+  normalizeBaseUrl(env.FEATHERLESS_BASE_URL || DEFAULT_FEATHERLESS_BASE_URL);
+
+const getFeatherlessEndpoints = (env: Env): FeatherlessEndpoint[] => {
+  const directBaseUrl = getDirectFeatherlessBaseUrl(env);
+  const proxyBaseUrl = env.FEATHERLESS_PROXY_BASE_URL?.trim()
+    ? normalizeBaseUrl(env.FEATHERLESS_PROXY_BASE_URL)
+    : "";
+  const endpoints: FeatherlessEndpoint[] = [];
+
+  if (proxyBaseUrl) {
+    endpoints.push({
+      baseUrl: proxyBaseUrl,
+      chatUrl: `${proxyBaseUrl}${CHAT_COMPLETIONS_PATH}`,
+      usingProxy: true,
+    });
+  }
+
+  if (!proxyBaseUrl || proxyBaseUrl !== directBaseUrl) {
+    endpoints.push({
+      baseUrl: directBaseUrl,
+      chatUrl: `${directBaseUrl}${CHAT_COMPLETIONS_PATH}`,
+      usingProxy: false,
+    });
+  }
+
+  return endpoints;
+};
+
+const createUpstreamHeaders = (env: Env, usingProxy: boolean) => {
+  const headers = new Headers({
+    Authorization: `Bearer ${env.FEATHERLESS_API_KEY}`,
+    "Content-Type": "application/json",
+  });
+
+  if (usingProxy && env.FEATHERLESS_PROXY_SHARED_SECRET) {
+    headers.set("X-Internal-Proxy-Key", env.FEATHERLESS_PROXY_SHARED_SECRET);
+  }
+
+  return headers;
+};
 
 const getErrorMessage = (error: unknown) =>
   error instanceof Error ? error.message : "Unknown error";
@@ -188,7 +231,7 @@ const fetchJsonWithRetries = async (
 };
 
 // Temporary runtime connectivity check when debugging Cloudflare reachability:
-// fetch(`${getFeatherlessBaseUrl(env)}${MODELS_PATH}`, {
+// fetch(`${getDirectFeatherlessBaseUrl(env)}${MODELS_PATH}`, {
 //   headers: { Authorization: `Bearer ${env.FEATHERLESS_API_KEY}` },
 // });
 
@@ -397,109 +440,147 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     );
   }
 
-  const featherlessBaseUrl = getFeatherlessBaseUrl(env);
-  const featherlessChatUrl = `${featherlessBaseUrl}${CHAT_COMPLETIONS_PATH}`;
-  const upstreamHeaders = new Headers({
-    Authorization: `Bearer ${env.FEATHERLESS_API_KEY}`,
-    "Content-Type": "application/json",
-  });
-
-  if (env.FEATHERLESS_PROXY_BASE_URL && env.FEATHERLESS_PROXY_SHARED_SECRET) {
-    upstreamHeaders.set("X-Internal-Proxy-Key", env.FEATHERLESS_PROXY_SHARED_SECRET);
-  }
+  const featherlessEndpoints = getFeatherlessEndpoints(env);
+  const primaryEndpoint = featherlessEndpoints[0];
 
   logInfo("Using Featherless endpoint", {
-    endpoint: featherlessChatUrl,
-    connectivityCheck: `${featherlessBaseUrl}${MODELS_PATH}`,
-    usingProxy: Boolean(env.FEATHERLESS_PROXY_BASE_URL),
+    endpoint: primaryEndpoint.chatUrl,
+    fallbackEndpoint: featherlessEndpoints[1]?.chatUrl,
+    connectivityCheck: `${primaryEndpoint.baseUrl}${MODELS_PATH}`,
+    usingProxy: primaryEndpoint.usingProxy,
   });
 
   try {
     let emptyResponseSummary: ReturnType<
       typeof getFeatherlessResponseSummary
     > | null = null;
+    let previousProxyFailure:
+      | {
+          endpoint: string;
+          status: number;
+          details: unknown;
+        }
+      | undefined;
 
-    for (
+    completionLoop: for (
       let completionAttempt = 1;
       completionAttempt <= MAX_NOTE_COMPLETION_ATTEMPTS;
       completionAttempt += 1
     ) {
-      const upstreamResponse = await fetchJsonWithRetries(featherlessChatUrl, {
-        method: "POST",
-        headers: upstreamHeaders,
-        body: JSON.stringify(createNoteCompletionBody(trimmedTranscript)),
-      });
+      const requestBody = JSON.stringify(createNoteCompletionBody(trimmedTranscript));
 
-      if (!upstreamResponse.ok) {
-        const details = getUpstreamErrorDetails(upstreamResponse.json);
-
-        logError("Featherless returned non-2xx status", {
-          endpoint: featherlessChatUrl,
-          status: upstreamResponse.status,
-          details,
+      for (
+        let endpointIndex = 0;
+        endpointIndex < featherlessEndpoints.length;
+        endpointIndex += 1
+      ) {
+        const endpoint = featherlessEndpoints[endpointIndex];
+        const hasFallbackEndpoint = endpointIndex < featherlessEndpoints.length - 1;
+        const upstreamResponse = await fetchJsonWithRetries(endpoint.chatUrl, {
+          method: "POST",
+          headers: createUpstreamHeaders(env, endpoint.usingProxy),
+          body: requestBody,
         });
 
-        return jsonResponse(
-          {
-            error: "Failed to generate note with Featherless.",
-            endpoint: featherlessChatUrl,
+        if (!upstreamResponse.ok) {
+          const details = getUpstreamErrorDetails(upstreamResponse.json);
+
+          if (endpoint.usingProxy) {
+            previousProxyFailure = {
+              endpoint: endpoint.chatUrl,
+              status: upstreamResponse.status,
+              details,
+            };
+          }
+
+          logError("Featherless returned non-2xx status", {
+            endpoint: endpoint.chatUrl,
             status: upstreamResponse.status,
             details,
-          },
-          { status: upstreamResponse.status },
-        );
-      }
+            usingProxy: endpoint.usingProxy,
+          });
 
-      const modelContent = getModelContent(upstreamResponse.json);
-      const responseSummary = getFeatherlessResponseSummary(upstreamResponse.json);
+          if (endpoint.usingProxy && hasFallbackEndpoint) {
+            logInfo("Retrying Featherless request without proxy", {
+              failedEndpoint: endpoint.chatUrl,
+              fallbackEndpoint: featherlessEndpoints[endpointIndex + 1].chatUrl,
+              completionAttempt,
+            });
+            continue;
+          }
 
-      if (!modelContent) {
-        emptyResponseSummary = responseSummary;
-        logError("Featherless response did not include final note content", {
-          endpoint: featherlessChatUrl,
-          completionAttempt,
-          maxCompletionAttempts: MAX_NOTE_COMPLETION_ATTEMPTS,
-          response: responseSummary,
-        });
-
-        if (completionAttempt < MAX_NOTE_COMPLETION_ATTEMPTS) {
-          await sleep(250 * completionAttempt);
-          continue;
+          return jsonResponse(
+            {
+              error: "Failed to generate note with Featherless.",
+              endpoint: endpoint.chatUrl,
+              status: upstreamResponse.status,
+              details,
+              previousProxyFailure,
+            },
+            { status: upstreamResponse.status },
+          );
         }
 
-        break;
-      }
+        const modelContent = getModelContent(upstreamResponse.json);
+        const responseSummary = getFeatherlessResponseSummary(upstreamResponse.json);
 
-      try {
-        const parsedNote = parseModelJson(modelContent);
-        return jsonResponse(normalizeNoteJson(parsedNote));
-      } catch (error) {
-        const details =
-          error instanceof Error ? error.message : "Unknown parse error";
+        if (!modelContent) {
+          emptyResponseSummary = responseSummary;
+          logError("Featherless response did not include final note content", {
+            endpoint: endpoint.chatUrl,
+            completionAttempt,
+            maxCompletionAttempts: MAX_NOTE_COMPLETION_ATTEMPTS,
+            response: responseSummary,
+          });
 
-        logError("The model response could not be parsed as valid JSON", {
-          endpoint: featherlessChatUrl,
-          completionAttempt,
-          maxCompletionAttempts: MAX_NOTE_COMPLETION_ATTEMPTS,
-          details,
-          response: responseSummary,
-          rawPreview: modelContent.slice(0, 300),
-        });
+          if (endpoint.usingProxy && hasFallbackEndpoint) {
+            logInfo("Retrying empty Featherless response without proxy", {
+              failedEndpoint: endpoint.chatUrl,
+              fallbackEndpoint: featherlessEndpoints[endpointIndex + 1].chatUrl,
+              completionAttempt,
+            });
+            continue;
+          }
 
-        if (completionAttempt < MAX_NOTE_COMPLETION_ATTEMPTS) {
-          await sleep(250 * completionAttempt);
-          continue;
+          if (completionAttempt < MAX_NOTE_COMPLETION_ATTEMPTS) {
+            await sleep(250 * completionAttempt);
+            continue completionLoop;
+          }
+
+          break completionLoop;
         }
 
-        return jsonResponse(
-          {
-            error: "The model response could not be parsed as valid JSON.",
+        try {
+          const parsedNote = parseModelJson(modelContent);
+          return jsonResponse(normalizeNoteJson(parsedNote));
+        } catch (error) {
+          const details =
+            error instanceof Error ? error.message : "Unknown parse error";
+
+          logError("The model response could not be parsed as valid JSON", {
+            endpoint: endpoint.chatUrl,
+            completionAttempt,
+            maxCompletionAttempts: MAX_NOTE_COMPLETION_ATTEMPTS,
             details,
             response: responseSummary,
-            raw: modelContent.slice(0, 1000),
-          },
-          { status: 502 },
-        );
+            rawPreview: modelContent.slice(0, 300),
+          });
+
+          if (completionAttempt < MAX_NOTE_COMPLETION_ATTEMPTS) {
+            await sleep(250 * completionAttempt);
+            continue completionLoop;
+          }
+
+          return jsonResponse(
+            {
+              error: "The model response could not be parsed as valid JSON.",
+              details,
+              response: responseSummary,
+              raw: modelContent.slice(0, 1000),
+            },
+            { status: 502 },
+          );
+        }
       }
     }
 
@@ -514,7 +595,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     );
   } catch (error) {
     logError("Featherless request failed after retries", {
-      endpoint: featherlessChatUrl,
+      endpoint: primaryEndpoint.chatUrl,
       attempts: MAX_FEATHERLESS_ATTEMPTS,
       details: getErrorMessage(error),
     });
@@ -522,7 +603,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     return jsonResponse(
       {
         error: "Unable to reach Featherless chat completions endpoint.",
-        endpoint: featherlessChatUrl,
+        endpoint: primaryEndpoint.chatUrl,
         attempts: MAX_FEATHERLESS_ATTEMPTS,
         details: getErrorMessage(error),
       },
