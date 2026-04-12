@@ -95,28 +95,14 @@ const getDirectFeatherlessBaseUrl = (env: Env) =>
 
 const getFeatherlessEndpoints = (env: Env): FeatherlessEndpoint[] => {
   const directBaseUrl = getDirectFeatherlessBaseUrl(env);
-  const proxyBaseUrl = env.FEATHERLESS_PROXY_BASE_URL?.trim()
-    ? normalizeBaseUrl(env.FEATHERLESS_PROXY_BASE_URL)
-    : "";
-  const endpoints: FeatherlessEndpoint[] = [];
 
-  if (proxyBaseUrl) {
-    endpoints.push({
-      baseUrl: proxyBaseUrl,
-      chatUrl: `${proxyBaseUrl}${CHAT_COMPLETIONS_PATH}`,
-      usingProxy: true,
-    });
-  }
-
-  if (!proxyBaseUrl || proxyBaseUrl !== directBaseUrl) {
-    endpoints.push({
+  return [
+    {
       baseUrl: directBaseUrl,
       chatUrl: `${directBaseUrl}${CHAT_COMPLETIONS_PATH}`,
       usingProxy: false,
-    });
-  }
-
-  return endpoints;
+    },
+  ];
 };
 
 const createUpstreamHeaders = (env: Env, usingProxy: boolean) => {
@@ -354,7 +340,6 @@ const createNoteCompletionBody = (trimmedTranscript: string) => ({
   model: NOTE_MODEL,
   temperature: 0,
   max_tokens: NOTE_MAX_TOKENS,
-  response_format: { type: "json_object" },
   messages: [
     { role: "system", content: SYSTEM_PROMPT },
     {
@@ -442,6 +427,14 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
 
   const featherlessEndpoints = getFeatherlessEndpoints(env);
   const primaryEndpoint = featherlessEndpoints[0];
+  let lastAttemptedEndpoint = primaryEndpoint;
+  let previousProxyFailure:
+    | {
+        endpoint: string;
+        status?: number;
+        details: unknown;
+      }
+    | undefined;
 
   logInfo("Using Featherless endpoint", {
     endpoint: primaryEndpoint.chatUrl,
@@ -454,13 +447,6 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     let emptyResponseSummary: ReturnType<
       typeof getFeatherlessResponseSummary
     > | null = null;
-    let previousProxyFailure:
-      | {
-          endpoint: string;
-          status: number;
-          details: unknown;
-        }
-      | undefined;
 
     completionLoop: for (
       let completionAttempt = 1;
@@ -476,11 +462,44 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
       ) {
         const endpoint = featherlessEndpoints[endpointIndex];
         const hasFallbackEndpoint = endpointIndex < featherlessEndpoints.length - 1;
-        const upstreamResponse = await fetchJsonWithRetries(endpoint.chatUrl, {
-          method: "POST",
-          headers: createUpstreamHeaders(env, endpoint.usingProxy),
-          body: requestBody,
-        });
+        lastAttemptedEndpoint = endpoint;
+
+        let upstreamResponse: Awaited<ReturnType<typeof fetchJsonWithRetries>>;
+
+        try {
+          upstreamResponse = await fetchJsonWithRetries(endpoint.chatUrl, {
+            method: "POST",
+            headers: createUpstreamHeaders(env, endpoint.usingProxy),
+            body: requestBody,
+          });
+        } catch (error) {
+          const details = getErrorMessage(error);
+
+          if (endpoint.usingProxy) {
+            previousProxyFailure = {
+              endpoint: endpoint.chatUrl,
+              details,
+            };
+          }
+
+          logError("Featherless endpoint request failed", {
+            endpoint: endpoint.chatUrl,
+            completionAttempt,
+            details,
+            usingProxy: endpoint.usingProxy,
+          });
+
+          if (endpoint.usingProxy && hasFallbackEndpoint) {
+            logInfo("Retrying Featherless request without proxy", {
+              failedEndpoint: endpoint.chatUrl,
+              fallbackEndpoint: featherlessEndpoints[endpointIndex + 1].chatUrl,
+              completionAttempt,
+            });
+            continue;
+          }
+
+          throw error;
+        }
 
         if (!upstreamResponse.ok) {
           const details = getUpstreamErrorDetails(upstreamResponse.json);
@@ -595,17 +614,19 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     );
   } catch (error) {
     logError("Featherless request failed after retries", {
-      endpoint: primaryEndpoint.chatUrl,
+      endpoint: lastAttemptedEndpoint.chatUrl,
       attempts: MAX_FEATHERLESS_ATTEMPTS,
       details: getErrorMessage(error),
+      previousProxyFailure,
     });
 
     return jsonResponse(
       {
         error: "Unable to reach Featherless chat completions endpoint.",
-        endpoint: primaryEndpoint.chatUrl,
+        endpoint: lastAttemptedEndpoint.chatUrl,
         attempts: MAX_FEATHERLESS_ATTEMPTS,
         details: getErrorMessage(error),
+        previousProxyFailure,
       },
       { status: 502 },
     );
