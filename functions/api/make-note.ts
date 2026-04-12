@@ -30,7 +30,7 @@ type FeatherlessEndpoint = {
   usingProxy: boolean;
 };
 
-const NOTE_MODEL = "Qwen/Qwen3.5-27B";
+const NOTE_MODEL = "Qwen/Qwen3-32B";
 const DEFAULT_FEATHERLESS_BASE_URL = "https://api.featherless.ai/v1";
 const CHAT_COMPLETIONS_PATH = "/chat/completions";
 const MODELS_PATH = "/models";
