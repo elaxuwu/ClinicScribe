@@ -24,17 +24,6 @@ type NoteJson = {
   uncertainties: string[];
 };
 
-type FeatherlessChatResponse = {
-  choices?: Array<{
-    message?: {
-      content?: string;
-    };
-  }>;
-  error?: {
-    message?: string;
-  };
-};
-
 const NOTE_MODEL = "Qwen/Qwen3.5-27B";
 const DEFAULT_FEATHERLESS_BASE_URL = "https://api.featherless.ai/v1";
 const CHAT_COMPLETIONS_PATH = "/chat/completions";
@@ -156,7 +145,7 @@ const fetchJsonWithRetries = async (
 ): Promise<{
   ok: boolean;
   status: number;
-  json: FeatherlessChatResponse;
+  json: unknown;
   text: string;
 }> => {
   let lastStatus = 0;
@@ -171,7 +160,7 @@ const fetchJsonWithRetries = async (
       return {
         ok: response.ok,
         status: response.status,
-        json: JSON.parse(response.text) as FeatherlessChatResponse,
+        json: JSON.parse(response.text) as unknown,
         text: response.text,
       };
     } catch (error) {
@@ -226,6 +215,66 @@ const toStringArray = (value: unknown) =>
   Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string")
     : [];
+
+const asRecord = (value: unknown) =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+
+const getUpstreamErrorDetails = (value: unknown) => {
+  const response = asRecord(value);
+  const error = asRecord(response?.error);
+
+  return typeof error?.message === "string" ? error.message : value;
+};
+
+const getTextFromContentPart = (value: unknown) => {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  const part = asRecord(value);
+
+  if (!part) {
+    return null;
+  }
+
+  if (typeof part.text === "string") {
+    return part.text;
+  }
+
+  const nestedText = asRecord(part.text);
+
+  return typeof nestedText?.value === "string" ? nestedText.value : null;
+};
+
+const getModelContent = (value: unknown) => {
+  const response = asRecord(value);
+  const choices = response?.choices;
+
+  if (!Array.isArray(choices)) {
+    return null;
+  }
+
+  const [firstChoice] = choices;
+  const choice = asRecord(firstChoice);
+  const message = asRecord(choice?.message);
+  const content = message?.content;
+
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (!Array.isArray(content)) {
+    return null;
+  }
+
+  const textParts = content
+    .map(getTextFromContentPart)
+    .filter((part): part is string => typeof part === "string" && part.length > 0);
+
+  return textParts.length > 0 ? textParts.join("\n") : null;
+};
 
 const normalizeNoteJson = (value: unknown): NoteJson => {
   const source =
@@ -334,10 +383,12 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     });
 
     if (!upstreamResponse.ok) {
+      const details = getUpstreamErrorDetails(upstreamResponse.json);
+
       logError("Featherless returned non-2xx status", {
         endpoint: featherlessChatUrl,
         status: upstreamResponse.status,
-        details: upstreamResponse.json.error?.message ?? upstreamResponse.json,
+        details,
       });
 
       return jsonResponse(
@@ -345,17 +396,20 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
           error: "Failed to generate note with Featherless.",
           endpoint: featherlessChatUrl,
           status: upstreamResponse.status,
-          details: upstreamResponse.json.error?.message ?? upstreamResponse.json,
+          details,
         },
         { status: upstreamResponse.status },
       );
     }
 
-    const modelContent = upstreamResponse.json.choices?.[0]?.message?.content;
+    const modelContent = getModelContent(upstreamResponse.json);
 
     if (!modelContent) {
       return jsonResponse(
-        { error: "Featherless response did not include note content." },
+        {
+          error: "Featherless response did not include note content.",
+          details: upstreamResponse.json,
+        },
         { status: 502 },
       );
     }
