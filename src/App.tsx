@@ -108,8 +108,13 @@ const formatTranscript = (result: TranscriptionResponse) => {
 const getErrorMessage = (value: unknown, fallback: string) => {
   if (value && typeof value === "object" && "error" in value) {
     const error = (value as { error?: unknown }).error;
+    const details = (value as { details?: unknown }).details;
 
     if (typeof error === "string") {
+      if (typeof details === "string" && details.trim()) {
+        return `${error} Details: ${details}`;
+      }
+
       return error;
     }
   }

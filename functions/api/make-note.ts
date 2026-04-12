@@ -1,5 +1,7 @@
 interface Env {
   FEATHERLESS_API_KEY?: string;
+  FEATHERLESS_BASE_URL?: string;
+  FEATHERLESS_PROXY_BASE_URL?: string;
 }
 
 type NoteJson = {
@@ -33,8 +35,11 @@ type FeatherlessChatResponse = {
 };
 
 const NOTE_MODEL = "Qwen/Qwen3.5-27B";
-const FEATHERLESS_CHAT_URL = "https://api.featherless.ai/v1/chat/completions";
+const DEFAULT_FEATHERLESS_BASE_URL = "https://api.featherless.ai/v1";
+const CHAT_COMPLETIONS_PATH = "/chat/completions";
+const MODELS_PATH = "/models";
 const MAX_TRANSCRIPT_CHARS = 30000;
+const MAX_FEATHERLESS_ATTEMPTS = 3;
 
 const SYSTEM_PROMPT = `You are a multilingual medical scribe for clinics.
 Faithfully transform transcript text into structured clinical documentation.
@@ -77,6 +82,77 @@ const jsonResponse = (body: unknown, init?: ResponseInit) =>
       ...init?.headers,
     },
   });
+
+const sleep = (ms: number) =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
+const getFeatherlessBaseUrl = (env: Env) =>
+  (env.FEATHERLESS_PROXY_BASE_URL ||
+    env.FEATHERLESS_BASE_URL ||
+    DEFAULT_FEATHERLESS_BASE_URL)
+    .trim()
+    .replace(/\/+$/, "");
+
+const getErrorMessage = (error: unknown) =>
+  error instanceof Error ? error.message : "Unknown error";
+
+const logInfo = (message: string, data?: Record<string, unknown>) => {
+  console.log(`[make-note] ${message}`, data ?? {});
+};
+
+const logError = (message: string, data?: Record<string, unknown>) => {
+  console.error(`[make-note] ${message}`, data ?? {});
+};
+
+const fetchTextWithNetworkRetries = async (url: string, init: RequestInit) => {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= MAX_FEATHERLESS_ATTEMPTS; attempt += 1) {
+    logInfo("Featherless request attempt", {
+      endpoint: url,
+      attempt,
+      maxAttempts: MAX_FEATHERLESS_ATTEMPTS,
+    });
+
+    try {
+      const response = await fetch(url, init);
+      logInfo("Featherless response received", {
+        endpoint: url,
+        attempt,
+        status: response.status,
+      });
+
+      const text = await response.text();
+      return {
+        ok: response.ok,
+        status: response.status,
+        text,
+      };
+    } catch (error) {
+      lastError = error;
+      logError("Featherless fetch/network error", {
+        endpoint: url,
+        attempt,
+        message: getErrorMessage(error),
+      });
+
+      if (attempt < MAX_FEATHERLESS_ATTEMPTS) {
+        await sleep(250 * 2 ** (attempt - 1));
+      }
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Featherless request failed without a response.");
+};
+
+// Temporary runtime connectivity check when debugging Cloudflare reachability:
+// fetch(`${getFeatherlessBaseUrl(env)}${MODELS_PATH}`, {
+//   headers: { Authorization: `Bearer ${env.FEATHERLESS_API_KEY}` },
+// });
 
 const parseModelJson = (content: string): unknown => {
   const trimmed = content
@@ -176,8 +252,17 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     );
   }
 
+  const featherlessBaseUrl = getFeatherlessBaseUrl(env);
+  const featherlessChatUrl = `${featherlessBaseUrl}${CHAT_COMPLETIONS_PATH}`;
+
+  logInfo("Using Featherless endpoint", {
+    endpoint: featherlessChatUrl,
+    connectivityCheck: `${featherlessBaseUrl}${MODELS_PATH}`,
+    usingProxy: Boolean(env.FEATHERLESS_PROXY_BASE_URL),
+  });
+
   try {
-    const upstreamResponse = await fetch(FEATHERLESS_CHAT_URL, {
+    const upstreamResponse = await fetchTextWithNetworkRetries(featherlessChatUrl, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${env.FEATHERLESS_API_KEY}`,
@@ -197,25 +282,39 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
       }),
     });
 
-    const upstreamText = await upstreamResponse.text();
     let upstreamJson: FeatherlessChatResponse;
 
     try {
-      upstreamJson = JSON.parse(upstreamText) as FeatherlessChatResponse;
+      upstreamJson = JSON.parse(upstreamResponse.text) as FeatherlessChatResponse;
     } catch {
+      logError("Featherless returned malformed JSON", {
+        endpoint: featherlessChatUrl,
+        status: upstreamResponse.status,
+        bodyPreview: upstreamResponse.text.slice(0, 300),
+      });
+
       return jsonResponse(
         {
           error: "Featherless returned a non-JSON response.",
-          details: upstreamText.slice(0, 500),
+          endpoint: featherlessChatUrl,
+          status: upstreamResponse.status,
+          details: upstreamResponse.text.slice(0, 500),
         },
         { status: 502 },
       );
     }
 
     if (!upstreamResponse.ok) {
+      logError("Featherless returned non-2xx status", {
+        endpoint: featherlessChatUrl,
+        status: upstreamResponse.status,
+        details: upstreamJson.error?.message ?? upstreamJson,
+      });
+
       return jsonResponse(
         {
           error: "Failed to generate note with Featherless.",
+          endpoint: featherlessChatUrl,
           status: upstreamResponse.status,
           details: upstreamJson.error?.message ?? upstreamJson,
         },
@@ -246,10 +345,18 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
       );
     }
   } catch (error) {
+    logError("Featherless request failed after retries", {
+      endpoint: featherlessChatUrl,
+      attempts: MAX_FEATHERLESS_ATTEMPTS,
+      details: getErrorMessage(error),
+    });
+
     return jsonResponse(
       {
         error: "Unable to reach Featherless chat completions endpoint.",
-        details: error instanceof Error ? error.message : "Unknown error",
+        endpoint: featherlessChatUrl,
+        attempts: MAX_FEATHERLESS_ATTEMPTS,
+        details: getErrorMessage(error),
       },
       { status: 502 },
     );
