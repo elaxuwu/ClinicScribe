@@ -4,7 +4,7 @@ export type GuestSession = {
   createdAt: string;
 };
 
-const GUEST_SESSION_STORAGE_KEY = "clinicscribe.guest-session";
+export const GUEST_SESSION_STORAGE_KEY = "clinicscribe.guest-session";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   createGuestSession,
+  GUEST_SESSION_STORAGE_KEY,
   persistGuestSession,
   readGuestSession,
   type GuestSession,
@@ -242,6 +243,7 @@ function App() {
         throw new Error("No transcript text was returned.");
       }
 
+      setError("");
       setTranscript(formattedTranscript);
       setNoteResult(null);
       setStatus("Transcript ready");
@@ -396,6 +398,34 @@ function App() {
   useEffect(() => {
     persistGuestSession(guestSession);
   }, [guestSession]);
+
+  useEffect(() => {
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key !== GUEST_SESSION_STORAGE_KEY) {
+        return;
+      }
+
+      const nextGuestSession = readGuestSession();
+
+      if (!nextGuestSession) {
+        return;
+      }
+
+      setGuestSession((currentGuestSession) =>
+        currentGuestSession.id === nextGuestSession.id &&
+        currentGuestSession.displayName === nextGuestSession.displayName &&
+        currentGuestSession.createdAt === nextGuestSession.createdAt
+          ? currentGuestSession
+          : nextGuestSession,
+      );
+    };
+
+    window.addEventListener("storage", handleStorage);
+
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+    };
+  }, []);
 
   useEffect(() => {
     return cleanupRecording;
