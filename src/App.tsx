@@ -564,6 +564,7 @@ function App() {
   const [noteResult, setNoteResult] = useState<NoteResult | null>(null);
   const [baseNoteResult, setBaseNoteResult] = useState<NoteResult | null>(null);
   const [currentNoteTitle, setCurrentNoteTitle] = useState("");
+  const [currentNoteTranscript, setCurrentNoteTranscript] = useState("");
   const [pendingRecordings, setPendingRecordings] = useState<NoteRecording[]>([]);
   const [currentNoteRecordings, setCurrentNoteRecordings] = useState<
     NoteRecording[]
@@ -682,6 +683,7 @@ function App() {
       setTranscript("");
       setNoteResult(null);
       setBaseNoteResult(null);
+      setCurrentNoteTranscript("");
       setPendingRecordings([]);
       setCurrentNoteRecordings([]);
       setSavedNotes([]);
@@ -768,10 +770,10 @@ function App() {
 
       const note = responseJson.note;
 
-      setTranscript(note.transcript);
       setBaseNoteResult(note.result);
       setNoteResult(note.result);
       setCurrentNoteTitle(note.title);
+      setCurrentNoteTranscript(note.transcript);
       setPendingRecordings([]);
       setCurrentNoteRecordings(note.recordings ?? []);
       setActiveNoteLanguage("Original");
@@ -894,6 +896,7 @@ function App() {
         setNoteResult(null);
         setBaseNoteResult(null);
         setCurrentNoteRecordings([]);
+        setCurrentNoteTranscript("");
         setCurrentNoteTitle("");
         navigateToView("dashboard");
       }
@@ -1071,6 +1074,7 @@ function App() {
       setNoteResult(null);
       setBaseNoteResult(null);
       setCurrentNoteRecordings([]);
+      setCurrentNoteTranscript("");
       setCurrentNoteTitle("");
       setActiveNoteLanguage("Original");
       setSelectedTranslationLanguage("");
@@ -1194,6 +1198,8 @@ function App() {
       return;
     }
 
+    const transcriptForNote = transcript.trim();
+
     setIsGeneratingNote(true);
     setNoteError("");
     setNoteResult(null);
@@ -1206,7 +1212,7 @@ function App() {
         },
         credentials: "same-origin",
         body: JSON.stringify({
-          transcript,
+          transcript: transcriptForNote,
           recordings: pendingRecordings.map((recording) => ({
             id: recording.id,
             transcript: recording.transcript,
@@ -1240,6 +1246,7 @@ function App() {
 
       setNoteResult(generatedNote);
       setBaseNoteResult(generatedNote);
+      setCurrentNoteTranscript(transcriptForNote);
       setTranscript("");
       setPendingRecordings([]);
       setCurrentNoteRecordings(getNoteRecordings(generatedNote));
@@ -1384,6 +1391,11 @@ function App() {
       setTranscript(typeof draft.transcript === "string" ? draft.transcript : "");
       setNoteResult(restoredNote);
       setBaseNoteResult(restoredBaseNote);
+      setCurrentNoteTranscript(
+        typeof draft.currentNoteTranscript === "string"
+          ? draft.currentNoteTranscript
+          : "",
+      );
       setPendingRecordings(getNoteRecordings({ recordings: draft.pendingRecordings }));
       setCurrentNoteRecordings(
         getNoteRecordings({ recordings: draft.currentNoteRecordings }),
@@ -1427,6 +1439,7 @@ function App() {
           transcript.trim().length > 0 ||
           Boolean(noteResult) ||
           Boolean(baseNoteResult) ||
+          currentNoteTranscript.trim().length > 0 ||
           pendingRecordings.length > 0 ||
           currentNoteRecordings.length > 0 ||
           currentNoteTitle.trim().length > 0;
@@ -1444,6 +1457,7 @@ function App() {
             transcript,
             noteResult,
             baseNoteResult,
+            currentNoteTranscript,
             pendingRecordings,
             currentNoteRecordings,
             currentNoteTitle,
@@ -1465,6 +1479,7 @@ function App() {
     activeNoteLanguage,
     activeView,
     baseNoteResult,
+    currentNoteTranscript,
     currentNoteRecordings,
     currentNoteTitle,
     currentUser,
@@ -1680,6 +1695,7 @@ function App() {
     transcript.trim().length > 0 ||
     Boolean(noteResult) ||
     Boolean(baseNoteResult) ||
+    currentNoteTranscript.trim().length > 0 ||
     pendingRecordings.length > 0 ||
     currentNoteRecordings.length > 0 ||
     currentNoteTitle.trim().length > 0;
@@ -1865,6 +1881,7 @@ function App() {
               setTranscript(event.target.value);
               setNoteResult(null);
               setBaseNoteResult(null);
+              setCurrentNoteTranscript("");
               setCurrentNoteTitle("");
               setActiveNoteLanguage("Original");
               setSelectedTranslationLanguage("");
@@ -2090,6 +2107,17 @@ function App() {
                   </div>
                 ) : null}
               </section>
+
+              {currentNoteTranscript.trim() ? (
+                <section className="rounded-2xl border border-zinc-200 p-5">
+                  <h3 className="text-lg font-semibold text-zinc-950">
+                    Saved transcript
+                  </h3>
+                  <p className="mt-3 whitespace-pre-wrap rounded-xl bg-zinc-50 p-4 text-sm leading-6 text-zinc-700">
+                    {currentNoteTranscript}
+                  </p>
+                </section>
+              ) : null}
 
               {currentNoteRecordings.length > 0 ? (
                 <section className="rounded-2xl border border-zinc-200 p-5">
