@@ -1,4 +1,6 @@
-interface Env {
+import { requireAuthenticatedUser, type AuthEnv } from "./auth";
+
+interface Env extends AuthEnv {
   PROXY_BASE_URL?: string;
   TRANSCRIPTION_MODEL?: string;
   PROXY_SHARED_SECRET?: string;
@@ -22,6 +24,12 @@ const jsonResponse = (body: unknown, init?: ResponseInit) =>
   });
 
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
+  const authResult = await requireAuthenticatedUser(request, env);
+
+  if (authResult instanceof Response) {
+    return authResult;
+  }
+
   const proxyBaseUrl = env.PROXY_BASE_URL?.trim().replace(/\/+$/, "");
   const transcriptionModel = env.TRANSCRIPTION_MODEL?.trim();
 

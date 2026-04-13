@@ -1,4 +1,6 @@
-interface Env {
+import { requireAuthenticatedUser, type AuthEnv } from "./auth";
+
+interface Env extends AuthEnv {
   FEATHERLESS_API_KEY?: string;
   FEATHERLESS_BASE_URL?: string;
   FEATHERLESS_MODEL?: string;
@@ -684,6 +686,12 @@ const summarizeProviderFailure = (
 };
 
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
+  const authResult = await requireAuthenticatedUser(request, env);
+
+  if (authResult instanceof Response) {
+    return authResult;
+  }
+
   let body: unknown;
 
   try {

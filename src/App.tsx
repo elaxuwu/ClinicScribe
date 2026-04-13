@@ -1,11 +1,4 @@
-import { useEffect, useRef, useState } from "react";
-import {
-  createGuestSession,
-  GUEST_SESSION_STORAGE_KEY,
-  persistGuestSession,
-  readGuestSession,
-  type GuestSession,
-} from "./guestSession";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 
 type TranscriptionSegment = {
   speaker?: string | number;
@@ -38,6 +31,20 @@ type NoteResult = {
   };
   discharge_instructions?: unknown;
   uncertainties?: unknown;
+};
+
+type CurrentUser = {
+  id: string;
+  email: string;
+  name: string;
+  createdAt: string;
+};
+
+type AuthMode = "login" | "signup";
+
+type AuthResponse = {
+  user?: CurrentUser;
+  error?: string;
 };
 
 const getSupportedMimeType = () => {
@@ -150,6 +157,16 @@ const getProviderLabel = (value: unknown) => {
   return "";
 };
 
+const parseJsonResponse = async (response: Response, invalidMessage: string) => {
+  const responseText = await response.text();
+
+  try {
+    return JSON.parse(responseText) as unknown;
+  } catch {
+    throw new Error(invalidMessage);
+  }
+};
+
 const renderList = (items: unknown) => {
   const values = asStringArray(items);
 
@@ -169,9 +186,15 @@ const renderList = (items: unknown) => {
 };
 
 function App() {
-  const [guestSession, setGuestSession] = useState<GuestSession>(
-    () => readGuestSession() ?? createGuestSession(),
-  );
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+  const [isCheckingAuth, setIsCheckingAuth] = useState(true);
+  const [authMode, setAuthMode] = useState<AuthMode>("login");
+  const [authName, setAuthName] = useState("");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [isAuthSubmitting, setIsAuthSubmitting] = useState(false);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [transcript, setTranscript] = useState("");
   const [status, setStatus] = useState("Ready");
   const [error, setError] = useState("");
@@ -192,8 +215,90 @@ function App() {
     chunksRef.current = [];
   };
 
-  const handleResetGuestSession = () => {
-    setGuestSession(createGuestSession());
+  const handleAuthSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setAuthError("");
+    setIsAuthSubmitting(true);
+
+    try {
+      const response = await fetch("/api/auth", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "same-origin",
+        body: JSON.stringify({
+          action: authMode,
+          email: authEmail,
+          password: authPassword,
+          ...(authMode === "signup" ? { name: authName } : {}),
+        }),
+      });
+      const responseJson = (await parseJsonResponse(
+        response,
+        "The auth endpoint returned invalid JSON.",
+      )) as AuthResponse;
+
+      if (!response.ok || !responseJson.user) {
+        throw new Error(
+          getErrorMessage(
+            responseJson,
+            authMode === "signup"
+              ? "Unable to create account."
+              : "Unable to sign in.",
+          ),
+        );
+      }
+
+      setCurrentUser(responseJson.user);
+      setAuthPassword("");
+      setAuthError("");
+    } catch (submitError) {
+      setAuthError(
+        submitError instanceof Error
+          ? submitError.message
+          : "Authentication failed.",
+      );
+    } finally {
+      setIsAuthSubmitting(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    setError("");
+    setIsLoggingOut(true);
+
+    try {
+      const response = await fetch("/api/auth", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "same-origin",
+        body: JSON.stringify({ action: "logout" }),
+      });
+      const responseJson = await parseJsonResponse(
+        response,
+        "The auth endpoint returned invalid JSON.",
+      );
+
+      if (!response.ok) {
+        throw new Error(getErrorMessage(responseJson, "Unable to sign out."));
+      }
+
+      cleanupRecording();
+      setCurrentUser(null);
+      setTranscript("");
+      setNoteResult(null);
+      setNoteError("");
+      setStatus("Ready");
+    } catch (logoutError) {
+      setError(
+        logoutError instanceof Error ? logoutError.message : "Unable to sign out.",
+      );
+    } finally {
+      setIsLoggingOut(false);
+    }
   };
 
   const transcribeAudio = async (audioBlob: Blob) => {
@@ -207,10 +312,10 @@ function App() {
       });
 
       formData.set("audio", file);
-      formData.set("guestId", guestSession.id);
 
       const response = await fetch("/api/transcribe", {
         method: "POST",
+        credentials: "same-origin",
         body: formData,
       });
 
@@ -362,10 +467,8 @@ function App() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          transcript,
-          guestId: guestSession.id,
-        }),
+        credentials: "same-origin",
+        body: JSON.stringify({ transcript }),
       });
 
       const responseText = await response.text();
@@ -396,40 +499,165 @@ function App() {
   };
 
   useEffect(() => {
-    persistGuestSession(guestSession);
-  }, [guestSession]);
+    let isMounted = true;
 
-  useEffect(() => {
-    const handleStorage = (event: StorageEvent) => {
-      if (event.key !== GUEST_SESSION_STORAGE_KEY) {
-        return;
+    const checkAuth = async () => {
+      try {
+        const response = await fetch("/api/auth", {
+          credentials: "same-origin",
+        });
+
+        if (response.status === 401) {
+          if (isMounted) {
+            setCurrentUser(null);
+          }
+
+          return;
+        }
+
+        const responseJson = (await parseJsonResponse(
+          response,
+          "The auth endpoint returned invalid JSON.",
+        )) as AuthResponse;
+
+        if (!response.ok || !responseJson.user) {
+          throw new Error(
+            getErrorMessage(responseJson, "Unable to check your session."),
+          );
+        }
+
+        if (isMounted) {
+          setCurrentUser(responseJson.user);
+        }
+      } catch (authCheckError) {
+        if (isMounted) {
+          setAuthError(
+            authCheckError instanceof Error
+              ? authCheckError.message
+              : "Unable to check your session.",
+          );
+        }
+      } finally {
+        if (isMounted) {
+          setIsCheckingAuth(false);
+        }
       }
-
-      const nextGuestSession = readGuestSession();
-
-      if (!nextGuestSession) {
-        return;
-      }
-
-      setGuestSession((currentGuestSession) =>
-        currentGuestSession.id === nextGuestSession.id &&
-        currentGuestSession.displayName === nextGuestSession.displayName &&
-        currentGuestSession.createdAt === nextGuestSession.createdAt
-          ? currentGuestSession
-          : nextGuestSession,
-      );
     };
 
-    window.addEventListener("storage", handleStorage);
+    void checkAuth();
 
     return () => {
-      window.removeEventListener("storage", handleStorage);
+      isMounted = false;
     };
   }, []);
 
   useEffect(() => {
     return cleanupRecording;
   }, []);
+
+  if (isCheckingAuth) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-zinc-100 px-4 py-8 text-zinc-950">
+        <div className="rounded-[2rem] border border-zinc-200 bg-white p-6 text-sm text-zinc-600 shadow-sm">
+          Checking your session...
+        </div>
+      </main>
+    );
+  }
+
+  if (!currentUser) {
+    const isSignup = authMode === "signup";
+
+    return (
+      <main className="min-h-screen bg-zinc-100 px-4 py-8 text-zinc-950 sm:px-6 lg:px-8">
+        <section className="mx-auto flex min-h-[calc(100vh-4rem)] max-w-md items-center">
+          <div className="w-full rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-sm sm:p-8">
+            <p className="text-sm font-medium text-zinc-500">ClinicScribe</p>
+            <h1 className="mt-2 text-2xl font-semibold tracking-normal text-zinc-950">
+              {isSignup ? "Create your account" : "Sign in"}
+            </h1>
+            <p className="mt-2 text-sm leading-6 text-zinc-500">
+              Keep clinic transcription behind your own account.
+            </p>
+
+            <form className="mt-6 space-y-4" onSubmit={handleAuthSubmit}>
+              {isSignup ? (
+                <label className="block text-sm font-medium text-zinc-700">
+                  Name
+                  <input
+                    className="mt-2 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-3 text-zinc-950 outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100"
+                    onChange={(event) => setAuthName(event.target.value)}
+                    placeholder="Dr. Nguyen"
+                    type="text"
+                    value={authName}
+                  />
+                </label>
+              ) : null}
+
+              <label className="block text-sm font-medium text-zinc-700">
+                Email
+                <input
+                  autoComplete="email"
+                  className="mt-2 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-3 text-zinc-950 outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100"
+                  onChange={(event) => setAuthEmail(event.target.value)}
+                  placeholder="you@clinic.com"
+                  required
+                  type="email"
+                  value={authEmail}
+                />
+              </label>
+
+              <label className="block text-sm font-medium text-zinc-700">
+                Password
+                <input
+                  autoComplete={isSignup ? "new-password" : "current-password"}
+                  className="mt-2 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-3 text-zinc-950 outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100"
+                  minLength={8}
+                  onChange={(event) => setAuthPassword(event.target.value)}
+                  placeholder="At least 8 characters"
+                  required
+                  type="password"
+                  value={authPassword}
+                />
+              </label>
+
+              {authError ? (
+                <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                  {authError}
+                </div>
+              ) : null}
+
+              <button
+                className="w-full rounded-lg bg-zinc-950 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
+                disabled={isAuthSubmitting}
+                type="submit"
+              >
+                {isAuthSubmitting
+                  ? isSignup
+                    ? "Creating account..."
+                    : "Signing in..."
+                  : isSignup
+                    ? "Create account"
+                    : "Sign in"}
+              </button>
+            </form>
+
+            <button
+              className="mt-5 w-full rounded-lg border border-zinc-300 px-4 py-3 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
+              onClick={() => {
+                setAuthMode(isSignup ? "login" : "signup");
+                setAuthError("");
+                setAuthPassword("");
+              }}
+              type="button"
+            >
+              {isSignup ? "I already have an account" : "Create an account"}
+            </button>
+          </div>
+        </section>
+      </main>
+    );
+  }
 
   return (
     <main className="min-h-screen bg-zinc-100 px-4 py-8 text-zinc-950 sm:px-6 lg:px-8">
@@ -444,17 +672,16 @@ function App() {
             </div>
 
             <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm">
-              <p className="font-medium text-zinc-700">Current guest</p>
-              <p className="mt-1 text-zinc-950">{guestSession.displayName}</p>
-              <p className="mt-1 font-mono text-xs text-zinc-500">
-                {guestSession.id}
-              </p>
+              <p className="font-medium text-zinc-700">Signed in</p>
+              <p className="mt-1 text-zinc-950">{currentUser.name}</p>
+              <p className="mt-1 text-xs text-zinc-500">{currentUser.email}</p>
               <button
                 className="mt-3 rounded-lg border border-zinc-300 px-3 py-2 text-xs font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-white"
-                onClick={handleResetGuestSession}
+                disabled={isLoggingOut}
+                onClick={() => void handleLogout()}
                 type="button"
               >
-                Reset Guest Session
+                {isLoggingOut ? "Signing out..." : "Sign out"}
               </button>
             </div>
           </div>
