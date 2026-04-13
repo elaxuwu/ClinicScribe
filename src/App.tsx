@@ -1205,12 +1205,15 @@ function App() {
 
       setNoteResult(generatedNote);
       setBaseNoteResult(generatedNote);
+      setTranscript("");
       setPendingRecordings([]);
       setCurrentNoteRecordings(getNoteRecordings(generatedNote));
       setCurrentNoteTitle(getStringValue(generatedNote.title));
       setActiveNoteLanguage("Original");
       setSelectedTranslationLanguage("");
       setTranslationStatus("Saved to your note vault.");
+      setStatus("Ready");
+      setAutosaveStatus("Transcript cleared after saving");
       navigateToView("note");
       setSavedNotes((currentNotes) =>
         upsertSavedNoteSummary(currentNotes, savedNoteSummary),
