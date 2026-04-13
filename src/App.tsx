@@ -52,7 +52,7 @@ type AuthResponse = {
   error?: string;
 };
 
-type AppView = "scribe" | "dashboard";
+type AppView = "scribe" | "dashboard" | "note";
 
 type SavedNoteSummary = {
   id: string;
@@ -116,6 +116,22 @@ const LANGUAGE_OPTIONS = [
   "Thai",
   "Indonesian",
 ];
+
+const AUTOSAVE_DELAY_MS = 600;
+
+const getAutosaveKey = (userId: string) => `clinicscribe.autosave.${userId}`;
+
+const getAutosaveTimeLabel = () =>
+  new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(new Date());
+
+const asNoteResultDraft = (value: unknown) =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? (value as NoteResult)
+    : null;
 
 const getSupportedMimeType = () => {
   const types = [
@@ -394,11 +410,15 @@ function App() {
   const [vaultError, setVaultError] = useState("");
   const [languageSearch, setLanguageSearch] = useState("");
   const [isLanguagePickerOpen, setIsLanguagePickerOpen] = useState(false);
+  const [selectedTranslationLanguage, setSelectedTranslationLanguage] =
+    useState("");
   const [isTranslating, setIsTranslating] = useState(false);
   const [translationStatus, setTranslationStatus] = useState("");
   const [showDebugPanel, setShowDebugPanel] = useState(false);
   const [noteError, setNoteError] = useState("");
   const [isGeneratingNote, setIsGeneratingNote] = useState(false);
+  const [hasHydratedAutosave, setHasHydratedAutosave] = useState(false);
+  const [autosaveStatus, setAutosaveStatus] = useState("Autosave ready");
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -495,7 +515,10 @@ function App() {
       setNoteResult(null);
       setBaseNoteResult(null);
       setSavedNotes([]);
+      setSelectedTranslationLanguage("");
       setNoteError("");
+      setHasHydratedAutosave(false);
+      setAutosaveStatus("Autosave ready");
       setStatus("Ready");
     } catch (logoutError) {
       setError(
@@ -556,28 +579,15 @@ function App() {
       setNoteResult(note.result);
       setCurrentNoteTitle(note.title);
       setActiveNoteLanguage("Original");
+      setSelectedTranslationLanguage("");
       setTranslationStatus("");
       setNoteError("");
-      setActiveView("scribe");
+      setActiveView("note");
     } catch (openError) {
       setVaultError(
         openError instanceof Error ? openError.message : "Unable to open note.",
       );
     }
-  };
-
-  const startNewNote = () => {
-    cleanupRecording();
-    setActiveView("scribe");
-    setTranscript("");
-    setNoteResult(null);
-    setBaseNoteResult(null);
-    setCurrentNoteTitle("");
-    setActiveNoteLanguage("Original");
-    setTranslationStatus("");
-    setNoteError("");
-    setError("");
-    setStatus("Ready");
   };
 
   const showOriginalNote = () => {
@@ -590,6 +600,22 @@ function App() {
     setTranslationStatus("");
   };
 
+  const selectTranslationLanguage = (language: string) => {
+    setSelectedTranslationLanguage(language);
+    setIsLanguagePickerOpen(false);
+    setLanguageSearch("");
+    setTranslationStatus("");
+  };
+
+  const translateSelectedLanguage = () => {
+    if (!selectedTranslationLanguage) {
+      setNoteError("Choose a language before translating.");
+      return;
+    }
+
+    void translateNote(selectedTranslationLanguage);
+  };
+
   const translateNote = async (language: string, force = false) => {
     const noteId = getNoteId(baseNoteResult ?? noteResult);
 
@@ -599,6 +625,7 @@ function App() {
     }
 
     setIsTranslating(true);
+    setIsLanguagePickerOpen(false);
     setNoteError("");
     setTranslationStatus("");
 
@@ -633,6 +660,7 @@ function App() {
       );
       setCurrentNoteTitle(responseJson.title ?? currentNoteTitle);
       setActiveNoteLanguage(responseJson.language);
+      setSelectedTranslationLanguage(responseJson.language);
       setTranslationStatus(
         responseJson.cached
           ? `Loaded saved ${responseJson.language} translation.`
@@ -700,13 +728,18 @@ function App() {
       }
 
       setError("");
-      setTranscript(formattedTranscript);
+      setTranscript((currentTranscript) =>
+        currentTranscript.trim()
+          ? `${currentTranscript.trimEnd()}\n\n${formattedTranscript}`
+          : formattedTranscript,
+      );
       setNoteResult(null);
       setBaseNoteResult(null);
       setCurrentNoteTitle("");
       setActiveNoteLanguage("Original");
+      setSelectedTranslationLanguage("");
       setTranslationStatus("");
-      setStatus("Transcript ready");
+      setStatus("Transcript added");
     } catch (transcriptionError) {
       setError(
         transcriptionError instanceof Error
@@ -722,13 +755,7 @@ function App() {
 
   const startRecording = async () => {
     setError("");
-    setTranscript("");
     setNoteError("");
-    setNoteResult(null);
-    setBaseNoteResult(null);
-    setCurrentNoteTitle("");
-    setActiveNoteLanguage("Original");
-    setTranslationStatus("");
 
     if (!navigator.mediaDevices?.getUserMedia) {
       setError("Microphone recording is not supported in this browser.");
@@ -810,6 +837,29 @@ function App() {
     void startRecording();
   };
 
+  const clearCurrentTranscript = () => {
+    cleanupRecording();
+    setIsRecording(false);
+    setTranscript("");
+    setNoteResult(null);
+    setBaseNoteResult(null);
+    setCurrentNoteTitle("");
+    setActiveNoteLanguage("Original");
+    setSelectedTranslationLanguage("");
+    setIsLanguagePickerOpen(false);
+    setLanguageSearch("");
+    setTranslationStatus("");
+    setNoteError("");
+    setError("");
+    setStatus("Ready");
+
+    if (currentUser) {
+      localStorage.removeItem(getAutosaveKey(currentUser.id));
+    }
+
+    setAutosaveStatus("Transcript cleared");
+  };
+
   const generateNote = async () => {
     if (!transcript.trim()) {
       setNoteError("Add or record a transcript before generating a note.");
@@ -851,7 +901,9 @@ function App() {
       setBaseNoteResult(generatedNote);
       setCurrentNoteTitle(getStringValue(generatedNote.title));
       setActiveNoteLanguage("Original");
+      setSelectedTranslationLanguage("");
       setTranslationStatus("Saved to your note vault.");
+      setActiveView("note");
       void loadSavedNotes();
     } catch (noteGenerationError) {
       setNoteError(
@@ -924,6 +976,121 @@ function App() {
 
     void loadSavedNotes();
   }, [currentUser]);
+
+  useEffect(() => {
+    if (!currentUser) {
+      setHasHydratedAutosave(false);
+      return;
+    }
+
+    try {
+      const savedDraft = localStorage.getItem(getAutosaveKey(currentUser.id));
+
+      if (!savedDraft) {
+        setAutosaveStatus("Autosave ready");
+        setHasHydratedAutosave(true);
+        return;
+      }
+
+      const parsedDraft = JSON.parse(savedDraft) as unknown;
+
+      if (
+        !parsedDraft ||
+        typeof parsedDraft !== "object" ||
+        Array.isArray(parsedDraft)
+      ) {
+        setAutosaveStatus("Autosave ready");
+        setHasHydratedAutosave(true);
+        return;
+      }
+
+      const draft = parsedDraft as Record<string, unknown>;
+      const restoredNote = asNoteResultDraft(draft.noteResult);
+      const restoredBaseNote = asNoteResultDraft(draft.baseNoteResult);
+      const restoredView =
+        draft.activeView === "note" && restoredNote
+          ? "note"
+          : draft.activeView === "dashboard"
+            ? "dashboard"
+            : "scribe";
+
+      setTranscript(typeof draft.transcript === "string" ? draft.transcript : "");
+      setNoteResult(restoredNote);
+      setBaseNoteResult(restoredBaseNote);
+      setCurrentNoteTitle(
+        typeof draft.currentNoteTitle === "string" ? draft.currentNoteTitle : "",
+      );
+      setActiveNoteLanguage(
+        typeof draft.activeNoteLanguage === "string"
+          ? draft.activeNoteLanguage
+          : "Original",
+      );
+      setSelectedTranslationLanguage(
+        typeof draft.selectedTranslationLanguage === "string"
+          ? draft.selectedTranslationLanguage
+          : "",
+      );
+      setActiveView(restoredView);
+      setAutosaveStatus("Draft restored from autosave");
+    } catch {
+      setAutosaveStatus("Autosave unavailable");
+    } finally {
+      setHasHydratedAutosave(true);
+    }
+  }, [currentUser]);
+
+  useEffect(() => {
+    if (!currentUser || !hasHydratedAutosave) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      try {
+        const hasDraft =
+          transcript.trim().length > 0 ||
+          Boolean(noteResult) ||
+          Boolean(baseNoteResult) ||
+          currentNoteTitle.trim().length > 0;
+
+        if (!hasDraft) {
+          localStorage.removeItem(getAutosaveKey(currentUser.id));
+          setAutosaveStatus("Autosave ready");
+          return;
+        }
+
+        localStorage.setItem(
+          getAutosaveKey(currentUser.id),
+          JSON.stringify({
+            activeView,
+            transcript,
+            noteResult,
+            baseNoteResult,
+            currentNoteTitle,
+            activeNoteLanguage,
+            selectedTranslationLanguage,
+            updatedAt: new Date().toISOString(),
+          }),
+        );
+        setAutosaveStatus(`Autosaved at ${getAutosaveTimeLabel()}`);
+      } catch {
+        setAutosaveStatus("Autosave unavailable");
+      }
+    }, AUTOSAVE_DELAY_MS);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [
+    activeNoteLanguage,
+    activeView,
+    baseNoteResult,
+    currentNoteTitle,
+    currentUser,
+    hasHydratedAutosave,
+    noteResult,
+    selectedTranslationLanguage,
+    transcript,
+  ]);
 
   useEffect(() => {
     const sequence = ["w", "w", "a", "a", "s", "s", "d", "d"];
@@ -1112,6 +1279,19 @@ function App() {
     language.toLowerCase().includes(languageSearch.trim().toLowerCase()),
   );
   const noteHeading = currentNoteTitle || getStringValue(noteResult?.title);
+  const hasCurrentDraft =
+    transcript.trim().length > 0 ||
+    Boolean(noteResult) ||
+    Boolean(baseNoteResult) ||
+    currentNoteTitle.trim().length > 0;
+  const selectedLanguageLabel = selectedTranslationLanguage
+    ? `Translate to ${selectedTranslationLanguage}`
+    : "Choose language";
+  const translateButtonLabel = isTranslating
+    ? selectedTranslationLanguage
+      ? `Translating to ${selectedTranslationLanguage}...`
+      : "Translating..."
+    : "Translate";
 
   return (
     <main className="min-h-screen bg-zinc-100 px-4 py-8 text-zinc-950 sm:px-6 lg:px-8">
@@ -1153,7 +1333,7 @@ function App() {
               onClick={() => setActiveView("scribe")}
               type="button"
             >
-              Scribe
+              Home
             </button>
             <button
               className={`rounded-lg px-4 py-2 text-sm font-semibold transition ${
@@ -1168,13 +1348,6 @@ function App() {
               type="button"
             >
               Dashboard
-            </button>
-            <button
-              className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
-              onClick={startNewNote}
-              type="button"
-            >
-              New note
             </button>
           </div>
 
@@ -1223,14 +1396,14 @@ function App() {
                     <p className="mt-1 text-sm text-zinc-500">
                       {formatDate(savedNote.createdAt)}
                       {savedNote.translation_languages?.length
-                        ? ` · ${savedNote.translation_languages.join(", ")}`
+                        ? ` - ${savedNote.translation_languages.join(", ")}`
                         : ""}
                     </p>
                   </button>
                 ))}
               </div>
             </div>
-          ) : (
+          ) : activeView === "scribe" ? (
             <>
 
           <textarea
@@ -1241,6 +1414,7 @@ function App() {
               setBaseNoteResult(null);
               setCurrentNoteTitle("");
               setActiveNoteLanguage("Original");
+              setSelectedTranslationLanguage("");
               setTranslationStatus("");
             }}
             placeholder="Vietnamese or English clinic transcript will appear here..."
@@ -1253,49 +1427,82 @@ function App() {
             </div>
           ) : null}
 
-          <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <p className="text-sm text-zinc-500">
-              {isRecording ? "Recording in progress" : status}
-              {isUploading ? "..." : ""}
-            </p>
+          <div className="mt-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <p className="text-sm text-zinc-500">
+                {isRecording ? "Recording in progress" : status}
+                {isUploading ? "..." : ""}
+              </p>
+              <p className="mt-1 text-xs text-zinc-400">{autosaveStatus}</p>
+            </div>
 
-            <button
-              className="rounded-lg bg-zinc-950 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
-              disabled={isUploading}
-              onClick={handleButtonClick}
-              type="button"
-            >
-              {isRecording ? "Stop recording" : "Start recording"}
-            </button>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <button
+                className="rounded-lg border border-zinc-300 px-5 py-3 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:border-zinc-200 disabled:text-zinc-400"
+                disabled={
+                  !hasCurrentDraft ||
+                  isRecording ||
+                  isUploading ||
+                  isGeneratingNote
+                }
+                onClick={clearCurrentTranscript}
+                type="button"
+              >
+                Clear transcript
+              </button>
+
+              <button
+                className="rounded-lg border border-zinc-300 px-5 py-3 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:border-zinc-200 disabled:text-zinc-400"
+                disabled={isUploading}
+                onClick={handleButtonClick}
+                type="button"
+              >
+                {isRecording ? "Stop recording" : "Start recording"}
+              </button>
+
+              <button
+                className="rounded-lg bg-zinc-950 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
+                disabled={
+                  isRecording ||
+                  isUploading ||
+                  isGeneratingNote ||
+                  transcript.trim().length === 0
+                }
+                onClick={() => void generateNote()}
+                type="button"
+              >
+                {isGeneratingNote ? "Generating..." : "Generate Note"}
+              </button>
+            </div>
           </div>
+
+          {noteError ? (
+            <div className="mt-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+              {noteError}
+            </div>
+          ) : null}
             </>
-          )}
+          ) : null}
         </div>
 
-        {activeView === "scribe" ? (
+        {activeView === "note" ? (
         <div className="rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-sm sm:p-8">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
             <div>
               <h2 className="text-xl font-semibold tracking-normal text-zinc-950">
-                Note maker
+                Clinical note
               </h2>
               <p className="mt-1 text-sm text-zinc-500">
-                Generate SOAP documentation from the transcript above.
+                {noteHeading || "Review the generated documentation."}
               </p>
             </div>
 
             <button
-              className="rounded-lg bg-zinc-950 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
-              disabled={
-                isRecording ||
-                isUploading ||
-                isGeneratingNote ||
-                transcript.trim().length === 0
-              }
-              onClick={() => void generateNote()}
+              className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
+              onClick={() => setActiveView("scribe")}
               type="button"
             >
-              {isGeneratingNote ? "Generating..." : "Generate Note"}
+              Return home
             </button>
           </div>
 
@@ -1329,28 +1536,38 @@ function App() {
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
                       <button
                         className="rounded-lg border border-zinc-300 px-3 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:text-zinc-400"
-                        disabled={activeNoteLanguage === "Original"}
+                        disabled={
+                          isTranslating || activeNoteLanguage === "Original"
+                        }
                         onClick={showOriginalNote}
                         type="button"
                       >
                         Original
                       </button>
 
-                      <div className="relative">
+                      <div className="relative sm:w-64">
                         <button
-                          className="w-full rounded-lg border border-zinc-300 px-3 py-2 text-left text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50 sm:w-52"
+                          className={`w-full rounded-lg border px-3 py-2 text-left text-sm font-semibold transition disabled:cursor-not-allowed ${
+                            isTranslating
+                              ? "border-zinc-200 bg-zinc-100 text-zinc-400"
+                              : "border-zinc-300 text-zinc-700 hover:border-zinc-400 hover:bg-zinc-50"
+                          }`}
+                          disabled={isTranslating}
                           onClick={() =>
                             setIsLanguagePickerOpen((current) => !current)
                           }
                           type="button"
                         >
-                          Translate note
+                          <span className="block truncate">
+                            {selectedLanguageLabel}
+                          </span>
                         </button>
 
                         {isLanguagePickerOpen ? (
                           <div className="absolute right-0 z-10 mt-2 w-64 rounded-xl border border-zinc-200 bg-white p-3 shadow-lg">
                             <input
-                              className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+                              className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm outline-none transition disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400 focus:border-zinc-400 focus:bg-white"
+                              disabled={isTranslating}
                               onChange={(event) =>
                                 setLanguageSearch(event.target.value)
                               }
@@ -1358,35 +1575,46 @@ function App() {
                               value={languageSearch}
                             />
                             <div className="mt-2 max-h-56 overflow-y-auto">
-                              {filteredLanguages.map((language) => (
-                                <button
-                                  className="block w-full rounded-lg px-3 py-2 text-left text-sm text-zinc-700 transition hover:bg-zinc-50"
-                                  key={language}
-                                  onClick={() => void translateNote(language)}
-                                  type="button"
-                                >
-                                  {language}
-                                  {translationLanguages.includes(language) ? (
-                                    <span className="ml-2 text-xs text-zinc-400">
-                                      saved
-                                    </span>
-                                  ) : null}
-                                </button>
-                              ))}
+                              {filteredLanguages.length > 0 ? (
+                                filteredLanguages.map((language) => (
+                                  <button
+                                    className={`block w-full rounded-lg px-3 py-2 text-left text-sm transition disabled:cursor-not-allowed disabled:text-zinc-400 ${
+                                      selectedTranslationLanguage === language
+                                        ? "bg-zinc-100 font-semibold text-zinc-950"
+                                        : "text-zinc-700 hover:bg-zinc-50"
+                                    }`}
+                                    disabled={isTranslating}
+                                    key={language}
+                                    onClick={() =>
+                                      selectTranslationLanguage(language)
+                                    }
+                                    type="button"
+                                  >
+                                    {language}
+                                    {translationLanguages.includes(language) ? (
+                                      <span className="ml-2 text-xs text-zinc-400">
+                                        saved
+                                      </span>
+                                    ) : null}
+                                  </button>
+                                ))
+                              ) : (
+                                <p className="px-3 py-2 text-sm text-zinc-500">
+                                  No matching languages.
+                                </p>
+                              )}
                             </div>
                           </div>
                         ) : null}
                       </div>
 
                       <button
-                        className="rounded-lg border border-zinc-300 px-3 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:text-zinc-400"
-                        disabled={
-                          isTranslating || activeNoteLanguage === "Original"
-                        }
-                        onClick={() => void translateNote(activeNoteLanguage, true)}
+                        className="rounded-lg bg-zinc-950 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
+                        disabled={isTranslating || !selectedTranslationLanguage}
+                        onClick={translateSelectedLanguage}
                         type="button"
                       >
-                        {isTranslating ? "Translating..." : "Re-translate"}
+                        {translateButtonLabel}
                       </button>
                     </div>
                   ) : null}
@@ -1477,7 +1705,11 @@ function App() {
                 </p>
               </section>
             </div>
-          ) : null}
+          ) : (
+            <div className="mt-6 rounded-2xl border border-zinc-200 bg-zinc-50 p-5 text-sm text-zinc-500">
+              Generate a note from Home to review it here.
+            </div>
+          )}
         </div>
         ) : null}
       </section>
