@@ -28,7 +28,7 @@ type UpstashResponse = {
 
 const SESSION_COOKIE_NAME = "clinicscribe_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
-const PASSWORD_HASH_ITERATIONS = 210000;
+const PASSWORD_HASH_ITERATIONS = 100000;
 const REDIS_PREFIX = "clinicscribe";
 const textEncoder = new TextEncoder();
 

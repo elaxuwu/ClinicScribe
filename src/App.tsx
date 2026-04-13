@@ -192,6 +192,10 @@ function App() {
   const [authName, setAuthName] = useState("");
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
+  const [authPasswordConfirmation, setAuthPasswordConfirmation] = useState("");
+  const [showAuthPassword, setShowAuthPassword] = useState(false);
+  const [showAuthPasswordConfirmation, setShowAuthPasswordConfirmation] =
+    useState(false);
   const [authError, setAuthError] = useState("");
   const [isAuthSubmitting, setIsAuthSubmitting] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
@@ -218,6 +222,12 @@ function App() {
   const handleAuthSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setAuthError("");
+
+    if (authMode === "signup" && authPassword !== authPasswordConfirmation) {
+      setAuthError("Passwords do not match.");
+      return;
+    }
+
     setIsAuthSubmitting(true);
 
     try {
@@ -252,6 +262,7 @@ function App() {
 
       setCurrentUser(responseJson.user);
       setAuthPassword("");
+      setAuthPasswordConfirmation("");
       setAuthError("");
     } catch (submitError) {
       setAuthError(
@@ -609,17 +620,55 @@ function App() {
 
               <label className="block text-sm font-medium text-zinc-700">
                 Password
-                <input
-                  autoComplete={isSignup ? "new-password" : "current-password"}
-                  className="mt-2 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-3 text-zinc-950 outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100"
-                  minLength={8}
-                  onChange={(event) => setAuthPassword(event.target.value)}
-                  placeholder="At least 8 characters"
-                  required
-                  type="password"
-                  value={authPassword}
-                />
+                <span className="mt-2 flex overflow-hidden rounded-lg border border-zinc-200 bg-zinc-50 transition focus-within:border-zinc-400 focus-within:bg-white focus-within:ring-4 focus-within:ring-zinc-100">
+                  <input
+                    autoComplete={isSignup ? "new-password" : "current-password"}
+                    className="min-w-0 flex-1 bg-transparent px-3 py-3 text-zinc-950 outline-none"
+                    minLength={8}
+                    onChange={(event) => setAuthPassword(event.target.value)}
+                    placeholder="At least 8 characters"
+                    required
+                    type={showAuthPassword ? "text" : "password"}
+                    value={authPassword}
+                  />
+                  <button
+                    className="shrink-0 border-l border-zinc-200 px-3 text-xs font-semibold text-zinc-600 transition hover:bg-white"
+                    onClick={() => setShowAuthPassword((current) => !current)}
+                    type="button"
+                  >
+                    {showAuthPassword ? "Hide" : "Show"}
+                  </button>
+                </span>
               </label>
+
+              {isSignup ? (
+                <label className="block text-sm font-medium text-zinc-700">
+                  Confirm password
+                  <span className="mt-2 flex overflow-hidden rounded-lg border border-zinc-200 bg-zinc-50 transition focus-within:border-zinc-400 focus-within:bg-white focus-within:ring-4 focus-within:ring-zinc-100">
+                    <input
+                      autoComplete="new-password"
+                      className="min-w-0 flex-1 bg-transparent px-3 py-3 text-zinc-950 outline-none"
+                      minLength={8}
+                      onChange={(event) =>
+                        setAuthPasswordConfirmation(event.target.value)
+                      }
+                      placeholder="Type it again"
+                      required
+                      type={showAuthPasswordConfirmation ? "text" : "password"}
+                      value={authPasswordConfirmation}
+                    />
+                    <button
+                      className="shrink-0 border-l border-zinc-200 px-3 text-xs font-semibold text-zinc-600 transition hover:bg-white"
+                      onClick={() =>
+                        setShowAuthPasswordConfirmation((current) => !current)
+                      }
+                      type="button"
+                    >
+                      {showAuthPasswordConfirmation ? "Hide" : "Show"}
+                    </button>
+                  </span>
+                </label>
+              ) : null}
 
               {authError ? (
                 <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -648,6 +697,9 @@ function App() {
                 setAuthMode(isSignup ? "login" : "signup");
                 setAuthError("");
                 setAuthPassword("");
+                setAuthPasswordConfirmation("");
+                setShowAuthPassword(false);
+                setShowAuthPasswordConfirmation(false);
               }}
               type="button"
             >
