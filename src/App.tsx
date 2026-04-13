@@ -380,6 +380,30 @@ const getNoteId = (note: NoteResult | null) => getStringValue(note?.note_id);
 const getTranslationLanguages = (note: NoteResult | null) =>
   asStringArray(note?.translation_languages);
 
+const getLanguageKey = (language: string) => language.trim().toLowerCase();
+
+const getOriginalNoteLanguage = (note: NoteResult | null) =>
+  getStringValue(note?.language_detected);
+
+const uniqueLanguages = (languages: string[]) => {
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  languages.forEach((language) => {
+    const trimmedLanguage = language.trim();
+    const key = getLanguageKey(trimmedLanguage);
+
+    if (!key || seen.has(key)) {
+      return;
+    }
+
+    seen.add(key);
+    result.push(trimmedLanguage);
+  });
+
+  return result;
+};
+
 const formatDate = (value: string) => {
   const date = new Date(value);
 
@@ -873,14 +897,16 @@ function App() {
     }
   };
 
-  const showOriginalNote = () => {
+  const showOriginalNote = (language = getOriginalNoteLanguage(baseNoteResult)) => {
     if (!baseNoteResult) {
       return;
     }
 
     setNoteResult(baseNoteResult);
     setActiveNoteLanguage("Original");
-    setTranslationStatus("");
+    setTranslationStatus(
+      language ? `Showing saved original ${language} note.` : "Showing saved original note.",
+    );
   };
 
   const selectTranslationLanguage = (language: string) => {
@@ -893,6 +919,16 @@ function App() {
   const translateSelectedLanguage = () => {
     if (!selectedTranslationLanguage) {
       setNoteError("Choose a language before translating.");
+      return;
+    }
+
+    const originalLanguage = getOriginalNoteLanguage(baseNoteResult);
+
+    if (
+      originalLanguage &&
+      getLanguageKey(selectedTranslationLanguage) === getLanguageKey(originalLanguage)
+    ) {
+      showOriginalNote(originalLanguage);
       return;
     }
 
@@ -1615,8 +1651,18 @@ function App() {
   }
 
   const currentNoteId = getNoteId(baseNoteResult ?? noteResult);
-  const translationLanguages = getTranslationLanguages(baseNoteResult ?? noteResult);
-  const filteredLanguages = LANGUAGE_OPTIONS.filter((language) =>
+  const sourceNote = baseNoteResult ?? noteResult;
+  const originalNoteLanguage = getOriginalNoteLanguage(sourceNote);
+  const translationLanguages = getTranslationLanguages(sourceNote);
+  const savedNoteLanguages = uniqueLanguages([
+    originalNoteLanguage,
+    ...translationLanguages,
+  ]);
+  const languageOptions = uniqueLanguages([
+    ...LANGUAGE_OPTIONS,
+    originalNoteLanguage,
+  ]);
+  const filteredLanguages = languageOptions.filter((language) =>
     language.toLowerCase().includes(languageSearch.trim().toLowerCase()),
   );
   const noteHeading = currentNoteTitle || getStringValue(noteResult?.title);
@@ -1630,11 +1676,22 @@ function App() {
   const selectedLanguageLabel = selectedTranslationLanguage
     ? `Translate to ${selectedTranslationLanguage}`
     : "Choose language";
+  const selectedLanguageIsOriginal =
+    Boolean(originalNoteLanguage && selectedTranslationLanguage) &&
+    getLanguageKey(selectedTranslationLanguage) === getLanguageKey(originalNoteLanguage);
   const translateButtonLabel = isTranslating
     ? selectedTranslationLanguage
       ? `Translating to ${selectedTranslationLanguage}...`
       : "Translating..."
-    : "Translate";
+    : selectedLanguageIsOriginal
+      ? "Show saved original"
+      : "Translate";
+  const activeNoteLabel =
+    activeNoteLanguage === "Original"
+      ? originalNoteLanguage
+        ? `Saved original ${originalNoteLanguage} note`
+        : "Saved original note"
+      : `${activeNoteLanguage} translation`;
   const pageTitle =
     activeView === "dashboard"
       ? "Note vault"
@@ -1743,6 +1800,9 @@ function App() {
                         </p>
                         <p className="mt-1 text-sm text-zinc-500">
                           {formatDate(savedNote.createdAt)}
+                          {savedNote.language_detected
+                            ? ` - ${savedNote.language_detected} original`
+                            : ""}
                           {savedNote.recording_count
                             ? ` - ${savedNote.recording_count} recording${
                                 savedNote.recording_count === 1 ? "" : "s"
@@ -1902,9 +1962,7 @@ function App() {
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                   <div>
                     <p className="text-sm font-semibold text-zinc-500">
-                      {activeNoteLanguage === "Original"
-                        ? "Original note"
-                        : `${activeNoteLanguage} translation`}
+                      {activeNoteLabel}
                     </p>
                     <h3 className="mt-1 text-lg font-semibold text-zinc-950">
                       {noteHeading || "Saved ClinicScribe note"}
@@ -1918,17 +1976,6 @@ function App() {
 
                   {currentNoteId ? (
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
-                      <button
-                        className="rounded-lg border border-zinc-300 px-3 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:text-zinc-400"
-                        disabled={
-                          isTranslating || activeNoteLanguage === "Original"
-                        }
-                        onClick={showOriginalNote}
-                        type="button"
-                      >
-                        Original
-                      </button>
-
                       <div className="relative sm:w-64">
                         <button
                           className={`w-full rounded-lg border px-3 py-2 text-left text-sm font-semibold transition disabled:cursor-not-allowed ${
@@ -1975,7 +2022,17 @@ function App() {
                                     type="button"
                                   >
                                     {language}
-                                    {translationLanguages.includes(language) ? (
+                                    {originalNoteLanguage &&
+                                    getLanguageKey(language) ===
+                                      getLanguageKey(originalNoteLanguage) ? (
+                                      <span className="ml-2 text-xs text-zinc-400">
+                                        original saved
+                                      </span>
+                                    ) : savedNoteLanguages.some(
+                                        (savedLanguage) =>
+                                          getLanguageKey(savedLanguage) ===
+                                          getLanguageKey(language),
+                                      ) ? (
                                       <span className="ml-2 text-xs text-zinc-400">
                                         saved
                                       </span>
