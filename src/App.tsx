@@ -161,6 +161,14 @@ const getViewFromPathname = (pathname: string): AppView => {
 
 const getAutosaveKey = (userId: string) => `clinicscribe.autosave.${userId}`;
 
+const clearAutosavedDraft = (user: CurrentUser | null) => {
+  if (!user) {
+    return;
+  }
+
+  localStorage.removeItem(getAutosaveKey(user.id));
+};
+
 const getAutosaveTimeLabel = () =>
   new Intl.DateTimeFormat(undefined, {
     hour: "numeric",
@@ -582,6 +590,7 @@ function App() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
+  const suppressNextAutosaveRef = useRef(false);
 
   const cleanupRecording = () => {
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -1166,26 +1175,16 @@ function App() {
 
   const clearCurrentTranscript = () => {
     cleanupRecording();
+    clearAutosavedDraft(currentUser);
+    suppressNextAutosaveRef.current = true;
     setIsRecording(false);
     setTranscript("");
-    setNoteResult(null);
-    setBaseNoteResult(null);
     setPendingRecordings([]);
-    setCurrentNoteRecordings([]);
-    setCurrentNoteTitle("");
-    setActiveNoteLanguage("Original");
-    setSelectedTranslationLanguage("");
     setIsLanguagePickerOpen(false);
     setLanguageSearch("");
-    setTranslationStatus("");
     setNoteError("");
     setError("");
     setStatus("Ready");
-
-    if (currentUser) {
-      localStorage.removeItem(getAutosaveKey(currentUser.id));
-    }
-
     setAutosaveStatus("Transcript cleared");
   };
 
@@ -1417,6 +1416,13 @@ function App() {
 
     const timeoutId = window.setTimeout(() => {
       try {
+        if (suppressNextAutosaveRef.current) {
+          suppressNextAutosaveRef.current = false;
+          localStorage.removeItem(getAutosaveKey(currentUser.id));
+          setAutosaveStatus("Transcript cleared");
+          return;
+        }
+
         const hasDraft =
           transcript.trim().length > 0 ||
           Boolean(noteResult) ||
