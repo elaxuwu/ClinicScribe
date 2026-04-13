@@ -15,7 +15,6 @@ interface Env extends AuthEnv {
   FEATHERLESS_MODEL?: string;
   OLLAMA_API_KEY?: string;
   OLLAMA_MODEL?: string;
-  NOTE_UPSTREAM_TIMEOUT_MS?: string;
 }
 
 type ChatMessage = {
@@ -26,7 +25,6 @@ type ChatMessage = {
 type ProviderErrorKind =
   | "config"
   | "network"
-  | "timeout"
   | "http"
   | "malformed-json"
   | "missing-content"
@@ -47,9 +45,6 @@ const MAX_TRANSCRIPT_CHARS = 30000;
 const MAX_FEATHERLESS_ATTEMPTS = 3;
 const MAX_NOTE_COMPLETION_ATTEMPTS = 2;
 const NOTE_MAX_TOKENS = 4000;
-const DEFAULT_UPSTREAM_TIMEOUT_MS = 60000;
-const MIN_UPSTREAM_TIMEOUT_MS = 5000;
-const MAX_UPSTREAM_TIMEOUT_MS = 90000;
 
 const SYSTEM_PROMPT = `You are a multilingual medical scribe for clinics.
 Faithfully transform transcript text into structured clinical documentation.
@@ -138,25 +133,6 @@ const getRequiredEnv = (env: Env, name: keyof Env) => {
   return value;
 };
 
-const getUpstreamTimeoutMs = (env: Env) => {
-  const rawTimeout = env.NOTE_UPSTREAM_TIMEOUT_MS?.trim();
-
-  if (!rawTimeout) {
-    return DEFAULT_UPSTREAM_TIMEOUT_MS;
-  }
-
-  const timeoutMs = Number(rawTimeout);
-
-  if (!Number.isFinite(timeoutMs)) {
-    return DEFAULT_UPSTREAM_TIMEOUT_MS;
-  }
-
-  return Math.min(
-    MAX_UPSTREAM_TIMEOUT_MS,
-    Math.max(MIN_UPSTREAM_TIMEOUT_MS, Math.trunc(timeoutMs)),
-  );
-};
-
 const getErrorMessage = (error: unknown) =>
   error instanceof Error ? error.message : "Unknown error";
 
@@ -199,20 +175,13 @@ const safeJsonParse = (text: string) => {
   }
 };
 
-const fetchTextWithTimeout = async (
+const fetchText = async (
   providerName: string,
   url: string,
   init: RequestInit,
-  timeoutMs: number,
 ) => {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
   try {
-    const response = await fetch(url, {
-      ...init,
-      signal: controller.signal,
-    });
+    const response = await fetch(url, init);
     const text = await response.text();
 
     return {
@@ -221,37 +190,22 @@ const fetchTextWithTimeout = async (
       text,
     };
   } catch (error) {
-    const isAbort =
-      error instanceof DOMException
-        ? error.name === "AbortError"
-        : getErrorMessage(error).includes("aborted");
-
     throw new ProviderRequestError(
-      isAbort
-        ? `${providerName} timed out after ${timeoutMs / 1000} seconds.`
-        : `${providerName} network request failed.`,
+      `${providerName} network request failed.`,
       {
-        kind: isAbort ? "timeout" : "network",
+        kind: "network",
         details: getErrorMessage(error),
       },
     );
-  } finally {
-    clearTimeout(timeoutId);
   }
 };
 
-const fetchJsonWithTimeout = async (
+const fetchJson = async (
   providerName: string,
   url: string,
   init: RequestInit,
-  timeoutMs: number,
 ) => {
-  const response = await fetchTextWithTimeout(
-    providerName,
-    url,
-    init,
-    timeoutMs,
-  );
+  const response = await fetchText(providerName, url, init);
   const parsed = safeJsonParse(response.text);
 
   if (!response.ok) {
@@ -285,10 +239,6 @@ const isTransientFeatherlessError = (error: unknown) => {
     return true;
   }
 
-  if (error.kind === "timeout") {
-    return false;
-  }
-
   if (
     error.kind === "network" ||
     error.kind === "malformed-json"
@@ -305,7 +255,6 @@ const isTransientFeatherlessError = (error: unknown) => {
 const fetchFeatherlessJsonWithRetries = async (
   url: string,
   init: RequestInit,
-  timeoutMs: number,
 ) => {
   let lastError: unknown;
 
@@ -317,12 +266,7 @@ const fetchFeatherlessJsonWithRetries = async (
     });
 
     try {
-      const json = await fetchJsonWithTimeout(
-        "Featherless",
-        url,
-        init,
-        timeoutMs,
-      );
+      const json = await fetchJson("Featherless", url, init);
 
       logInfo("Featherless response received", {
         endpoint: url,
@@ -595,7 +539,6 @@ const generateWithFeatherless = async (
   const baseUrl = normalizeBaseUrl(getRequiredEnv(env, "FEATHERLESS_BASE_URL"));
   const model = getRequiredEnv(env, "FEATHERLESS_MODEL");
   const chatUrl = `${baseUrl}${CHAT_COMPLETIONS_PATH}`;
-  const timeoutMs = getUpstreamTimeoutMs(env);
   let lastError: unknown;
 
   logInfo("Using Featherless primary provider", {
@@ -609,20 +552,16 @@ const generateWithFeatherless = async (
     completionAttempt += 1
   ) {
     try {
-      const upstreamJson = await fetchFeatherlessJsonWithRetries(
-        chatUrl,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(
-            createFeatherlessCompletionBody(model, trimmedTranscript),
-          ),
+      const upstreamJson = await fetchFeatherlessJsonWithRetries(chatUrl, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
         },
-        timeoutMs,
-      );
+        body: JSON.stringify(
+          createFeatherlessCompletionBody(model, trimmedTranscript),
+        ),
+      });
 
       const modelContent = getOpenAiChatContent(upstreamJson);
       const responseSummary = getFeatherlessResponseSummary(upstreamJson);
@@ -676,14 +615,13 @@ const generateWithOllama = async (
 ): Promise<NoteJson> => {
   const apiKey = getRequiredEnv(env, "OLLAMA_API_KEY");
   const model = getRequiredEnv(env, "OLLAMA_MODEL");
-  const timeoutMs = getUpstreamTimeoutMs(env);
 
   logInfo("Using Ollama Cloud fallback provider", {
     endpoint: OLLAMA_CHAT_URL,
     model,
   });
 
-  const upstreamJson = await fetchJsonWithTimeout(
+  const upstreamJson = await fetchJson(
     "Ollama Cloud",
     OLLAMA_CHAT_URL,
     {
@@ -694,7 +632,6 @@ const generateWithOllama = async (
       },
       body: JSON.stringify(createOllamaChatBody(model, trimmedTranscript)),
     },
-    timeoutMs,
   );
 
   const modelContent = getOllamaChatContent(upstreamJson);

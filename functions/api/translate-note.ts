@@ -14,7 +14,6 @@ interface Env extends AuthEnv {
   FEATHERLESS_MODEL?: string;
   OLLAMA_API_KEY?: string;
   OLLAMA_MODEL?: string;
-  NOTE_UPSTREAM_TIMEOUT_MS?: string;
 }
 
 type ChatMessage = {
@@ -25,7 +24,6 @@ type ChatMessage = {
 type ProviderErrorKind =
   | "config"
   | "network"
-  | "timeout"
   | "http"
   | "malformed-json"
   | "missing-content"
@@ -43,9 +41,6 @@ type ProviderFailure = {
 const CHAT_COMPLETIONS_PATH = "/chat/completions";
 const OLLAMA_CHAT_URL = "https://ollama.com/api/chat";
 const NOTE_MAX_TOKENS = 4000;
-const DEFAULT_UPSTREAM_TIMEOUT_MS = 60000;
-const MIN_UPSTREAM_TIMEOUT_MS = 5000;
-const MAX_UPSTREAM_TIMEOUT_MS = 90000;
 
 const TRANSLATION_SYSTEM_PROMPT = `You translate clinical documentation for clinicians and patients.
 Translate every user-facing value into the requested language.
@@ -107,25 +102,6 @@ const getRequiredEnv = (env: Env, name: keyof Env) => {
   return value;
 };
 
-const getUpstreamTimeoutMs = (env: Env) => {
-  const rawTimeout = env.NOTE_UPSTREAM_TIMEOUT_MS?.trim();
-
-  if (!rawTimeout) {
-    return DEFAULT_UPSTREAM_TIMEOUT_MS;
-  }
-
-  const timeoutMs = Number(rawTimeout);
-
-  if (!Number.isFinite(timeoutMs)) {
-    return DEFAULT_UPSTREAM_TIMEOUT_MS;
-  }
-
-  return Math.min(
-    MAX_UPSTREAM_TIMEOUT_MS,
-    Math.max(MIN_UPSTREAM_TIMEOUT_MS, Math.trunc(timeoutMs)),
-  );
-};
-
 const getErrorMessage = (error: unknown) =>
   error instanceof Error ? error.message : "Unknown error";
 
@@ -164,20 +140,13 @@ const getUpstreamErrorDetails = (value: unknown) => {
   return typeof error?.message === "string" ? error.message : value;
 };
 
-const fetchTextWithTimeout = async (
+const fetchText = async (
   providerName: string,
   url: string,
   init: RequestInit,
-  timeoutMs: number,
 ) => {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
   try {
-    const response = await fetch(url, {
-      ...init,
-      signal: controller.signal,
-    });
+    const response = await fetch(url, init);
     const text = await response.text();
 
     return {
@@ -186,37 +155,22 @@ const fetchTextWithTimeout = async (
       text,
     };
   } catch (error) {
-    const isAbort =
-      error instanceof DOMException
-        ? error.name === "AbortError"
-        : getErrorMessage(error).includes("aborted");
-
     throw new ProviderRequestError(
-      isAbort
-        ? `${providerName} timed out after ${timeoutMs / 1000} seconds.`
-        : `${providerName} network request failed.`,
+      `${providerName} network request failed.`,
       {
-        kind: isAbort ? "timeout" : "network",
+        kind: "network",
         details: getErrorMessage(error),
       },
     );
-  } finally {
-    clearTimeout(timeoutId);
   }
 };
 
-const fetchJsonWithTimeout = async (
+const fetchJson = async (
   providerName: string,
   url: string,
   init: RequestInit,
-  timeoutMs: number,
 ) => {
-  const response = await fetchTextWithTimeout(
-    providerName,
-    url,
-    init,
-    timeoutMs,
-  );
+  const response = await fetchText(providerName, url, init);
   const parsed = safeJsonParse(response.text);
 
   if (!response.ok) {
@@ -406,7 +360,7 @@ const translateWithFeatherless = async (
   const baseUrl = normalizeBaseUrl(getRequiredEnv(env, "FEATHERLESS_BASE_URL"));
   const model = getRequiredEnv(env, "FEATHERLESS_MODEL");
   const messages = createTranslationMessages(note, language);
-  const upstreamJson = await fetchJsonWithTimeout(
+  const upstreamJson = await fetchJson(
     "Featherless",
     `${baseUrl}${CHAT_COMPLETIONS_PATH}`,
     {
@@ -417,7 +371,6 @@ const translateWithFeatherless = async (
       },
       body: JSON.stringify(createFeatherlessCompletionBody(model, messages)),
     },
-    getUpstreamTimeoutMs(env),
   );
   const modelContent = getOpenAiChatContent(upstreamJson);
 
@@ -452,7 +405,7 @@ const translateWithOllama = async (
   const apiKey = getRequiredEnv(env, "OLLAMA_API_KEY");
   const model = getRequiredEnv(env, "OLLAMA_MODEL");
   const messages = createTranslationMessages(note, language);
-  const upstreamJson = await fetchJsonWithTimeout(
+  const upstreamJson = await fetchJson(
     "Ollama Cloud",
     OLLAMA_CHAT_URL,
     {
@@ -463,7 +416,6 @@ const translateWithOllama = async (
       },
       body: JSON.stringify(createOllamaChatBody(model, messages)),
     },
-    getUpstreamTimeoutMs(env),
   );
   const modelContent = getOllamaChatContent(upstreamJson);
 
