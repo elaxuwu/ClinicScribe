@@ -634,6 +634,7 @@ function App() {
                   <button
                     className="shrink-0 border-l border-zinc-200 px-3 text-xs font-semibold text-zinc-600 transition hover:bg-white"
                     onClick={() => setShowAuthPassword((current) => !current)}
+                    tabIndex={-1}
                     type="button"
                   >
                     {showAuthPassword ? "Hide" : "Show"}
@@ -662,6 +663,7 @@ function App() {
                       onClick={() =>
                         setShowAuthPasswordConfirmation((current) => !current)
                       }
+                      tabIndex={-1}
                       type="button"
                     >
                       {showAuthPasswordConfirmation ? "Hide" : "Show"}
