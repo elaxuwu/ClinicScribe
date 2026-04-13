@@ -14,6 +14,11 @@ type TranscriptionResponse = {
 };
 
 type NoteResult = {
+  note_id?: unknown;
+  title?: unknown;
+  saved_at?: unknown;
+  updated_at?: unknown;
+  translation_languages?: unknown;
   language_detected?: unknown;
   provider_used?: unknown;
   soap?: {
@@ -46,6 +51,71 @@ type AuthResponse = {
   user?: CurrentUser;
   error?: string;
 };
+
+type AppView = "scribe" | "dashboard";
+
+type SavedNoteSummary = {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  language_detected?: string;
+  provider_used?: string;
+  translation_languages?: string[];
+};
+
+type SavedNoteDetail = {
+  id: string;
+  title: string;
+  transcript: string;
+  createdAt: string;
+  updatedAt: string;
+  result: NoteResult;
+  translations?: Record<
+    string,
+    {
+      language: string;
+      note: NoteResult;
+      provider_used: string;
+      createdAt: string;
+      updatedAt: string;
+    }
+  >;
+};
+
+type NotesResponse = {
+  notes?: SavedNoteSummary[];
+  note?: SavedNoteDetail;
+  error?: string;
+};
+
+type TranslateResponse = {
+  note_id?: string;
+  title?: string;
+  language?: string;
+  cached?: boolean;
+  result?: NoteResult;
+  error?: string;
+  details?: unknown;
+};
+
+const LANGUAGE_OPTIONS = [
+  "Vietnamese",
+  "English",
+  "Spanish",
+  "French",
+  "German",
+  "Chinese",
+  "Japanese",
+  "Korean",
+  "Tagalog",
+  "Arabic",
+  "Hindi",
+  "Portuguese",
+  "Russian",
+  "Thai",
+  "Indonesian",
+];
 
 const getSupportedMimeType = () => {
   const types = [
@@ -157,6 +227,83 @@ const getProviderLabel = (value: unknown) => {
   return "";
 };
 
+const getStringValue = (value: unknown) =>
+  typeof value === "string" ? value.trim() : "";
+
+const getNoteId = (note: NoteResult | null) => getStringValue(note?.note_id);
+
+const getTranslationLanguages = (note: NoteResult | null) =>
+  asStringArray(note?.translation_languages);
+
+const formatDate = (value: string) => {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
+};
+
+const splitNumberedItems = (value: unknown) => {
+  const text = getStringValue(value);
+
+  if (!text) {
+    return [];
+  }
+
+  const matches = [...text.matchAll(/(?:^|\s)(\d+)\.\s+/g)];
+
+  if (matches.length < 2) {
+    return [];
+  }
+
+  return matches
+    .map((match, index) => {
+      const start = (match.index ?? 0) + match[0].length;
+      const end =
+        index + 1 < matches.length ? (matches[index + 1].index ?? text.length) : text.length;
+
+      return text.slice(start, end).trim();
+    })
+    .filter(Boolean);
+};
+
+const splitClinicalItems = (value: unknown) => {
+  const text = getStringValue(value);
+
+  if (!text) {
+    return [];
+  }
+
+  const numberedItems = splitNumberedItems(text);
+
+  if (numberedItems.length > 0) {
+    return numberedItems;
+  }
+
+  const newlineItems = text
+    .split(/\n+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  if (newlineItems.length > 1) {
+    return newlineItems;
+  }
+
+  const sentenceItems = text
+    .split(/(?<=[.!?])\s+(?=[A-Z0-9])/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  return sentenceItems.length > 1 ? sentenceItems : [text];
+};
+
 const parseJsonResponse = async (response: Response, invalidMessage: string) => {
   const responseText = await response.text();
 
@@ -185,6 +332,39 @@ const renderList = (items: unknown) => {
   );
 };
 
+const renderBulletText = (value: unknown) => {
+  const items = splitClinicalItems(value);
+
+  if (items.length === 0) {
+    return <p className="text-sm text-zinc-500">Not documented.</p>;
+  }
+
+  return (
+    <ul className="mt-2 list-disc space-y-2 pl-5 text-sm leading-6 text-zinc-700">
+      {items.map((item, index) => (
+        <li key={`${item}-${index}`}>{item}</li>
+      ))}
+    </ul>
+  );
+};
+
+const renderNumberedText = (value: unknown) => {
+  const items = splitNumberedItems(value);
+  const fallbackItems = items.length > 0 ? items : splitClinicalItems(value);
+
+  if (fallbackItems.length === 0) {
+    return <p className="text-sm text-zinc-500">Not documented.</p>;
+  }
+
+  return (
+    <ol className="mt-2 list-decimal space-y-2 pl-5 text-sm leading-6 text-zinc-700">
+      {fallbackItems.map((item, index) => (
+        <li key={`${item}-${index}`}>{item}</li>
+      ))}
+    </ol>
+  );
+};
+
 function App() {
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
@@ -205,6 +385,18 @@ function App() {
   const [isRecording, setIsRecording] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [noteResult, setNoteResult] = useState<NoteResult | null>(null);
+  const [baseNoteResult, setBaseNoteResult] = useState<NoteResult | null>(null);
+  const [currentNoteTitle, setCurrentNoteTitle] = useState("");
+  const [activeNoteLanguage, setActiveNoteLanguage] = useState("Original");
+  const [activeView, setActiveView] = useState<AppView>("scribe");
+  const [savedNotes, setSavedNotes] = useState<SavedNoteSummary[]>([]);
+  const [isLoadingNotes, setIsLoadingNotes] = useState(false);
+  const [vaultError, setVaultError] = useState("");
+  const [languageSearch, setLanguageSearch] = useState("");
+  const [isLanguagePickerOpen, setIsLanguagePickerOpen] = useState(false);
+  const [isTranslating, setIsTranslating] = useState(false);
+  const [translationStatus, setTranslationStatus] = useState("");
+  const [showDebugPanel, setShowDebugPanel] = useState(false);
   const [noteError, setNoteError] = useState("");
   const [isGeneratingNote, setIsGeneratingNote] = useState(false);
 
@@ -301,6 +493,8 @@ function App() {
       setCurrentUser(null);
       setTranscript("");
       setNoteResult(null);
+      setBaseNoteResult(null);
+      setSavedNotes([]);
       setNoteError("");
       setStatus("Ready");
     } catch (logoutError) {
@@ -309,6 +503,152 @@ function App() {
       );
     } finally {
       setIsLoggingOut(false);
+    }
+  };
+
+  const loadSavedNotes = async () => {
+    setIsLoadingNotes(true);
+    setVaultError("");
+
+    try {
+      const response = await fetch("/api/notes", {
+        credentials: "same-origin",
+      });
+      const responseJson = (await parseJsonResponse(
+        response,
+        "The notes endpoint returned invalid JSON.",
+      )) as NotesResponse;
+
+      if (!response.ok || !Array.isArray(responseJson.notes)) {
+        throw new Error(getErrorMessage(responseJson, "Unable to load note vault."));
+      }
+
+      setSavedNotes(responseJson.notes);
+    } catch (notesError) {
+      setVaultError(
+        notesError instanceof Error ? notesError.message : "Unable to load notes.",
+      );
+    } finally {
+      setIsLoadingNotes(false);
+    }
+  };
+
+  const openSavedNote = async (noteId: string) => {
+    setVaultError("");
+
+    try {
+      const response = await fetch(`/api/notes?id=${encodeURIComponent(noteId)}`, {
+        credentials: "same-origin",
+      });
+      const responseJson = (await parseJsonResponse(
+        response,
+        "The notes endpoint returned invalid JSON.",
+      )) as NotesResponse;
+
+      if (!response.ok || !responseJson.note) {
+        throw new Error(getErrorMessage(responseJson, "Unable to open saved note."));
+      }
+
+      const note = responseJson.note;
+
+      setTranscript(note.transcript);
+      setBaseNoteResult(note.result);
+      setNoteResult(note.result);
+      setCurrentNoteTitle(note.title);
+      setActiveNoteLanguage("Original");
+      setTranslationStatus("");
+      setNoteError("");
+      setActiveView("scribe");
+    } catch (openError) {
+      setVaultError(
+        openError instanceof Error ? openError.message : "Unable to open note.",
+      );
+    }
+  };
+
+  const startNewNote = () => {
+    cleanupRecording();
+    setActiveView("scribe");
+    setTranscript("");
+    setNoteResult(null);
+    setBaseNoteResult(null);
+    setCurrentNoteTitle("");
+    setActiveNoteLanguage("Original");
+    setTranslationStatus("");
+    setNoteError("");
+    setError("");
+    setStatus("Ready");
+  };
+
+  const showOriginalNote = () => {
+    if (!baseNoteResult) {
+      return;
+    }
+
+    setNoteResult(baseNoteResult);
+    setActiveNoteLanguage("Original");
+    setTranslationStatus("");
+  };
+
+  const translateNote = async (language: string, force = false) => {
+    const noteId = getNoteId(baseNoteResult ?? noteResult);
+
+    if (!noteId) {
+      setNoteError("Generate or open a saved note before translating.");
+      return;
+    }
+
+    setIsTranslating(true);
+    setNoteError("");
+    setTranslationStatus("");
+
+    try {
+      const response = await fetch("/api/translate-note", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "same-origin",
+        body: JSON.stringify({ noteId, language, force }),
+      });
+      const responseJson = (await parseJsonResponse(
+        response,
+        "The translation endpoint returned invalid JSON.",
+      )) as TranslateResponse;
+
+      if (!response.ok || !responseJson.result || !responseJson.language) {
+        throw new Error(getErrorMessage(responseJson, "Unable to translate note."));
+      }
+
+      const nextTranslationLanguages = getTranslationLanguages(responseJson.result);
+
+      setNoteResult(responseJson.result);
+      setBaseNoteResult((current) =>
+        current
+          ? {
+              ...current,
+              translation_languages: nextTranslationLanguages,
+            }
+          : current,
+      );
+      setCurrentNoteTitle(responseJson.title ?? currentNoteTitle);
+      setActiveNoteLanguage(responseJson.language);
+      setTranslationStatus(
+        responseJson.cached
+          ? `Loaded saved ${responseJson.language} translation.`
+          : `Translated note to ${responseJson.language}.`,
+      );
+      setIsLanguagePickerOpen(false);
+      setLanguageSearch("");
+      void loadSavedNotes();
+    } catch (translationError) {
+      setNoteError(
+        translationError instanceof Error
+          ? translationError.message
+          : "Unable to translate note.",
+      );
+    } finally {
+      setIsTranslating(false);
     }
   };
 
@@ -362,6 +702,10 @@ function App() {
       setError("");
       setTranscript(formattedTranscript);
       setNoteResult(null);
+      setBaseNoteResult(null);
+      setCurrentNoteTitle("");
+      setActiveNoteLanguage("Original");
+      setTranslationStatus("");
       setStatus("Transcript ready");
     } catch (transcriptionError) {
       setError(
@@ -381,6 +725,10 @@ function App() {
     setTranscript("");
     setNoteError("");
     setNoteResult(null);
+    setBaseNoteResult(null);
+    setCurrentNoteTitle("");
+    setActiveNoteLanguage("Original");
+    setTranslationStatus("");
 
     if (!navigator.mediaDevices?.getUserMedia) {
       setError("Microphone recording is not supported in this browser.");
@@ -497,7 +845,14 @@ function App() {
         );
       }
 
-      setNoteResult(responseJson as NoteResult);
+      const generatedNote = responseJson as NoteResult;
+
+      setNoteResult(generatedNote);
+      setBaseNoteResult(generatedNote);
+      setCurrentNoteTitle(getStringValue(generatedNote.title));
+      setActiveNoteLanguage("Original");
+      setTranslationStatus("Saved to your note vault.");
+      void loadSavedNotes();
     } catch (noteGenerationError) {
       setNoteError(
         noteGenerationError instanceof Error
@@ -559,6 +914,44 @@ function App() {
 
     return () => {
       isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!currentUser) {
+      return;
+    }
+
+    void loadSavedNotes();
+  }, [currentUser]);
+
+  useEffect(() => {
+    const sequence = ["w", "w", "a", "a", "s", "s", "d", "d"];
+    let sequenceIndex = 0;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.altKey || event.ctrlKey || event.metaKey) {
+        return;
+      }
+
+      const key = event.key.toLowerCase();
+
+      if (key === sequence[sequenceIndex]) {
+        sequenceIndex += 1;
+      } else {
+        sequenceIndex = key === sequence[0] ? 1 : 0;
+      }
+
+      if (sequenceIndex === sequence.length) {
+        setShowDebugPanel((current) => !current);
+        sequenceIndex = 0;
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
     };
   }, []);
 
@@ -713,6 +1106,13 @@ function App() {
     );
   }
 
+  const currentNoteId = getNoteId(baseNoteResult ?? noteResult);
+  const translationLanguages = getTranslationLanguages(baseNoteResult ?? noteResult);
+  const filteredLanguages = LANGUAGE_OPTIONS.filter((language) =>
+    language.toLowerCase().includes(languageSearch.trim().toLowerCase()),
+  );
+  const noteHeading = currentNoteTitle || getStringValue(noteResult?.title);
+
   return (
     <main className="min-h-screen bg-zinc-100 px-4 py-8 text-zinc-950 sm:px-6 lg:px-8">
       <section className="mx-auto flex max-w-5xl flex-col gap-6">
@@ -721,8 +1121,11 @@ function App() {
             <div>
               <p className="text-sm font-medium text-zinc-500">ClinicScribe</p>
               <h1 className="mt-2 text-2xl font-semibold tracking-normal text-zinc-950">
-                Speech-to-text prototype
+                ClinicScribe
               </h1>
+              <p className="mt-2 text-sm text-zinc-500">
+                Clinical notes faster, clearer, and ready for review.
+              </p>
             </div>
 
             <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm">
@@ -740,11 +1143,105 @@ function App() {
             </div>
           </div>
 
+          <div className="mb-6 flex flex-wrap gap-2">
+            <button
+              className={`rounded-lg px-4 py-2 text-sm font-semibold transition ${
+                activeView === "scribe"
+                  ? "bg-zinc-950 text-white"
+                  : "border border-zinc-300 text-zinc-700 hover:border-zinc-400 hover:bg-zinc-50"
+              }`}
+              onClick={() => setActiveView("scribe")}
+              type="button"
+            >
+              Scribe
+            </button>
+            <button
+              className={`rounded-lg px-4 py-2 text-sm font-semibold transition ${
+                activeView === "dashboard"
+                  ? "bg-zinc-950 text-white"
+                  : "border border-zinc-300 text-zinc-700 hover:border-zinc-400 hover:bg-zinc-50"
+              }`}
+              onClick={() => {
+                setActiveView("dashboard");
+                void loadSavedNotes();
+              }}
+              type="button"
+            >
+              Dashboard
+            </button>
+            <button
+              className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
+              onClick={startNewNote}
+              type="button"
+            >
+              New note
+            </button>
+          </div>
+
+          {activeView === "dashboard" ? (
+            <div className="rounded-2xl border border-zinc-200 p-5">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h2 className="text-xl font-semibold tracking-normal text-zinc-950">
+                    Note vault
+                  </h2>
+                  <p className="mt-1 text-sm text-zinc-500">
+                    Your saved ClinicScribe notes stay tied to this account.
+                  </p>
+                </div>
+                <button
+                  className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
+                  disabled={isLoadingNotes}
+                  onClick={() => void loadSavedNotes()}
+                  type="button"
+                >
+                  {isLoadingNotes ? "Refreshing..." : "Refresh"}
+                </button>
+              </div>
+
+              {vaultError ? (
+                <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                  {vaultError}
+                </div>
+              ) : null}
+
+              <div className="mt-5 space-y-3">
+                {savedNotes.length === 0 && !isLoadingNotes ? (
+                  <p className="rounded-xl bg-zinc-50 px-4 py-3 text-sm text-zinc-500">
+                    No saved notes yet.
+                  </p>
+                ) : null}
+
+                {savedNotes.map((savedNote) => (
+                  <button
+                    className="block w-full rounded-xl border border-zinc-200 bg-white px-4 py-3 text-left transition hover:border-zinc-400 hover:bg-zinc-50"
+                    key={savedNote.id}
+                    onClick={() => void openSavedNote(savedNote.id)}
+                    type="button"
+                  >
+                    <p className="font-semibold text-zinc-950">{savedNote.title}</p>
+                    <p className="mt-1 text-sm text-zinc-500">
+                      {formatDate(savedNote.createdAt)}
+                      {savedNote.translation_languages?.length
+                        ? ` · ${savedNote.translation_languages.join(", ")}`
+                        : ""}
+                    </p>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <>
+
           <textarea
             className="min-h-72 w-full resize-none rounded-2xl border border-zinc-200 bg-zinc-50 p-4 text-base leading-7 text-zinc-900 shadow-inner outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100"
             onChange={(event) => {
               setTranscript(event.target.value);
               setNoteResult(null);
+              setBaseNoteResult(null);
+              setCurrentNoteTitle("");
+              setActiveNoteLanguage("Original");
+              setTranslationStatus("");
             }}
             placeholder="Vietnamese or English clinic transcript will appear here..."
             value={transcript}
@@ -771,8 +1268,11 @@ function App() {
               {isRecording ? "Stop recording" : "Start recording"}
             </button>
           </div>
+            </>
+          )}
         </div>
 
+        {activeView === "scribe" ? (
         <div className="rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-sm sm:p-8">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
@@ -808,40 +1308,125 @@ function App() {
           {noteResult ? (
             <div className="mt-6 space-y-6">
               <section className="rounded-2xl border border-zinc-200 p-5">
-                <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-                  <h3 className="text-lg font-semibold text-zinc-950">SOAP</h3>
-                  <div className="text-sm text-zinc-500 sm:text-right">
-                    <p>Language: {asText(noteResult.language_detected)}</p>
-                    {getProviderLabel(noteResult.provider_used) ? (
-                      <p>Provider: {getProviderLabel(noteResult.provider_used)}</p>
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                  <div>
+                    <p className="text-sm font-semibold text-zinc-500">
+                      {activeNoteLanguage === "Original"
+                        ? "Original note"
+                        : `${activeNoteLanguage} translation`}
+                    </p>
+                    <h3 className="mt-1 text-lg font-semibold text-zinc-950">
+                      {noteHeading || "Saved ClinicScribe note"}
+                    </h3>
+                    {translationStatus ? (
+                      <p className="mt-1 text-sm text-zinc-500">
+                        {translationStatus}
+                      </p>
                     ) : null}
                   </div>
+
+                  {currentNoteId ? (
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
+                      <button
+                        className="rounded-lg border border-zinc-300 px-3 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:text-zinc-400"
+                        disabled={activeNoteLanguage === "Original"}
+                        onClick={showOriginalNote}
+                        type="button"
+                      >
+                        Original
+                      </button>
+
+                      <div className="relative">
+                        <button
+                          className="w-full rounded-lg border border-zinc-300 px-3 py-2 text-left text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50 sm:w-52"
+                          onClick={() =>
+                            setIsLanguagePickerOpen((current) => !current)
+                          }
+                          type="button"
+                        >
+                          Translate note
+                        </button>
+
+                        {isLanguagePickerOpen ? (
+                          <div className="absolute right-0 z-10 mt-2 w-64 rounded-xl border border-zinc-200 bg-white p-3 shadow-lg">
+                            <input
+                              className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm outline-none transition focus:border-zinc-400 focus:bg-white"
+                              onChange={(event) =>
+                                setLanguageSearch(event.target.value)
+                              }
+                              placeholder="Search language..."
+                              value={languageSearch}
+                            />
+                            <div className="mt-2 max-h-56 overflow-y-auto">
+                              {filteredLanguages.map((language) => (
+                                <button
+                                  className="block w-full rounded-lg px-3 py-2 text-left text-sm text-zinc-700 transition hover:bg-zinc-50"
+                                  key={language}
+                                  onClick={() => void translateNote(language)}
+                                  type="button"
+                                >
+                                  {language}
+                                  {translationLanguages.includes(language) ? (
+                                    <span className="ml-2 text-xs text-zinc-400">
+                                      saved
+                                    </span>
+                                  ) : null}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+
+                      <button
+                        className="rounded-lg border border-zinc-300 px-3 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:text-zinc-400"
+                        disabled={
+                          isTranslating || activeNoteLanguage === "Original"
+                        }
+                        onClick={() => void translateNote(activeNoteLanguage, true)}
+                        type="button"
+                      >
+                        {isTranslating ? "Translating..." : "Re-translate"}
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
+
+                {showDebugPanel ? (
+                  <div className="mt-4 rounded-xl bg-zinc-950 px-4 py-3 text-sm text-zinc-100">
+                    <p>Debug panel</p>
+                    <p className="mt-1 text-zinc-300">
+                      Provider: {getProviderLabel(noteResult.provider_used) || "Unknown"}
+                    </p>
+                    <p className="text-zinc-300">
+                      Language: {asText(noteResult.language_detected)}
+                    </p>
+                    <p className="text-zinc-300">
+                      Note ID: {currentNoteId || "Unsaved"}
+                    </p>
+                  </div>
+                ) : null}
+              </section>
+
+              <section className="rounded-2xl border border-zinc-200 p-5">
+                <h3 className="mb-4 text-lg font-semibold text-zinc-950">SOAP</h3>
 
                 <div className="grid gap-4 md:grid-cols-2">
                   <div>
                     <p className="text-sm font-semibold text-zinc-900">Subjective</p>
-                    <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-zinc-700">
-                      {asText(noteResult.soap?.subjective)}
-                    </p>
+                    {renderBulletText(noteResult.soap?.subjective)}
                   </div>
                   <div>
                     <p className="text-sm font-semibold text-zinc-900">Objective</p>
-                    <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-zinc-700">
-                      {asText(noteResult.soap?.objective)}
-                    </p>
+                    {renderBulletText(noteResult.soap?.objective)}
                   </div>
                   <div>
                     <p className="text-sm font-semibold text-zinc-900">Assessment</p>
-                    <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-zinc-700">
-                      {asText(noteResult.soap?.assessment)}
-                    </p>
+                    {renderBulletText(noteResult.soap?.assessment)}
                   </div>
                   <div>
                     <p className="text-sm font-semibold text-zinc-900">Plan</p>
-                    <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-zinc-700">
-                      {asText(noteResult.soap?.plan)}
-                    </p>
+                    {renderNumberedText(noteResult.soap?.plan)}
                   </div>
                 </div>
               </section>
@@ -894,6 +1479,7 @@ function App() {
             </div>
           ) : null}
         </div>
+        ) : null}
       </section>
     </main>
   );

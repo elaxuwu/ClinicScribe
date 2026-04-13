@@ -75,7 +75,10 @@ const getRedisConfig = (env: AuthEnv) => {
   return { url, key };
 };
 
-const redisCommand = async (env: AuthEnv, command: Array<string | number>) => {
+export const redisCommand = async (
+  env: AuthEnv,
+  command: Array<string | number>,
+) => {
   const { url, key } = getRedisConfig(env);
   const response = await fetch(url, {
     method: "POST",

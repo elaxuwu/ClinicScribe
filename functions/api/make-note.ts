@@ -1,4 +1,10 @@
 import { requireAuthenticatedUser, type AuthEnv } from "./auth";
+import {
+  saveClinicNote,
+  toNoteResponse,
+  type NoteJson,
+  type ProviderUsed,
+} from "../../src/server/note-store";
 
 interface Env extends AuthEnv {
   FEATHERLESS_API_KEY?: string;
@@ -8,28 +14,6 @@ interface Env extends AuthEnv {
   OLLAMA_MODEL?: string;
   NOTE_UPSTREAM_TIMEOUT_MS?: string;
 }
-
-type ProviderUsed = "featherless" | "ollama";
-
-type NoteJson = {
-  language_detected: string;
-  soap: {
-    subjective: string;
-    objective: string;
-    assessment: string;
-    plan: string;
-  };
-  visit_summary: string;
-  extracted: {
-    symptoms: string[];
-    medications: string[];
-    follow_up_plan: string[];
-    red_flags: string[];
-  };
-  discharge_instructions: string;
-  uncertainties: string[];
-  provider_used: ProviderUsed;
-};
 
 type ChatMessage = {
   role: "system" | "user";
@@ -60,7 +44,7 @@ const MAX_TRANSCRIPT_CHARS = 30000;
 const MAX_FEATHERLESS_ATTEMPTS = 3;
 const MAX_NOTE_COMPLETION_ATTEMPTS = 2;
 const NOTE_MAX_TOKENS = 4000;
-const DEFAULT_UPSTREAM_TIMEOUT_MS = 45000;
+const DEFAULT_UPSTREAM_TIMEOUT_MS = 60000;
 const MIN_UPSTREAM_TIMEOUT_MS = 5000;
 const MAX_UPSTREAM_TIMEOUT_MS = 90000;
 
@@ -765,8 +749,10 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     );
   }
 
+  let generatedNote: NoteJson;
+
   try {
-    return jsonResponse(await generateWithFeatherless(env, trimmedTranscript));
+    generatedNote = await generateWithFeatherless(env, trimmedTranscript);
   } catch (featherlessError) {
     const featherlessFailure = summarizeProviderFailure(
       "featherless",
@@ -779,7 +765,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     });
 
     try {
-      return jsonResponse(await generateWithOllama(env, trimmedTranscript));
+      generatedNote = await generateWithOllama(env, trimmedTranscript);
     } catch (ollamaError) {
       const ollamaFailure = summarizeProviderFailure("ollama", ollamaError);
 
@@ -795,4 +781,13 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
       );
     }
   }
+
+  const savedNote = await saveClinicNote(
+    env,
+    authResult,
+    trimmedTranscript,
+    generatedNote,
+  );
+
+  return jsonResponse(toNoteResponse(savedNote));
 };
