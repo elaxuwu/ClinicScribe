@@ -34,22 +34,39 @@ export type NoteTranslation = {
   updatedAt: string;
 };
 
+export type NoteRecording = {
+  id: string;
+  name: string;
+  type: string;
+  size: number;
+  dataUrl: string;
+  transcript: string;
+  createdAt: string;
+};
+
 export type ClinicNote = {
   id: string;
   userId: string;
   title: string;
   transcript: string;
   note: NoteJson;
+  recordings: NoteRecording[];
   translations: Record<string, NoteTranslation>;
+  pinned: boolean;
+  pinnedAt?: string;
   createdAt: string;
   updatedAt: string;
 };
 
 const NOTE_PREFIX = "clinicscribe";
 const MAX_NOTE_LIST_COUNT = 100;
+const MAX_NOTE_RECORDING_COUNT = 10;
+const PENDING_RECORDING_TTL_SECONDS = 60 * 60 * 24;
 
 const getUserNotesKey = (userId: string) => `${NOTE_PREFIX}:notes:${userId}`;
 const getNoteKey = (noteId: string) => `${NOTE_PREFIX}:note:${noteId}`;
+const getPendingRecordingKey = (recordingId: string) =>
+  `${NOTE_PREFIX}:pending-recording:${recordingId}`;
 
 const asRecord = (value: unknown) =>
   value && typeof value === "object" && !Array.isArray(value)
@@ -58,6 +75,72 @@ const asRecord = (value: unknown) =>
 
 const isStringArray = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every((item) => typeof item === "string");
+
+const base64Encode = (bytes: Uint8Array) => {
+  let binary = "";
+
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+
+  return btoa(binary);
+};
+
+const fileToDataUrl = async (file: File) => {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const type = file.type || "application/octet-stream";
+
+  return `data:${type};base64,${base64Encode(bytes)}`;
+};
+
+const parseNoteRecording = (value: unknown) => {
+  const recording = asRecord(value);
+
+  if (
+    typeof recording?.id === "string" &&
+    typeof recording.name === "string" &&
+    typeof recording.type === "string" &&
+    typeof recording.size === "number" &&
+    typeof recording.dataUrl === "string" &&
+    typeof recording.transcript === "string" &&
+    typeof recording.createdAt === "string"
+  ) {
+    return recording as NoteRecording;
+  }
+
+  return null;
+};
+
+const parsePendingRecording = (value: unknown) => {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    const recording = parseNoteRecording(parsed);
+    const record = asRecord(parsed);
+
+    if (recording && typeof record?.userId === "string") {
+      return {
+        ...recording,
+        userId: record.userId,
+      };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+};
+
+const normalizeNoteRecordings = (value: unknown) =>
+  Array.isArray(value)
+    ? value
+        .map(parseNoteRecording)
+        .filter((recording): recording is NoteRecording => recording !== null)
+        .slice(0, MAX_NOTE_RECORDING_COUNT)
+    : [];
 
 export const normalizeLanguageKey = (language: string) =>
   language.trim().toLowerCase();
@@ -101,6 +184,9 @@ export const parseClinicNote = (value: unknown) => {
     ) {
       return {
         ...(note as Omit<ClinicNote, "translations">),
+        recordings: normalizeNoteRecordings(note.recordings),
+        pinned: note.pinned === true,
+        pinnedAt: typeof note.pinnedAt === "string" ? note.pinnedAt : undefined,
         translations:
           note.translations && typeof note.translations === "object"
             ? (note.translations as Record<string, NoteTranslation>)
@@ -127,6 +213,9 @@ export const toNoteResponse = (clinicNote: ClinicNote) => ({
   title: clinicNote.title,
   saved_at: clinicNote.createdAt,
   updated_at: clinicNote.updatedAt,
+  recordings: clinicNote.recordings,
+  pinned: clinicNote.pinned,
+  pinned_at: clinicNote.pinnedAt,
   translation_languages: Object.values(clinicNote.translations).map(
     (translation) => translation.language,
   ),
@@ -137,6 +226,7 @@ export const saveClinicNote = async (
   user: PublicUser,
   transcript: string,
   note: NoteJson,
+  recordings: NoteRecording[] = [],
 ) => {
   const now = new Date().toISOString();
   const clinicNote: ClinicNote = {
@@ -145,7 +235,9 @@ export const saveClinicNote = async (
     title: makeTitle(note, transcript),
     transcript,
     note,
+    recordings: recordings.slice(0, MAX_NOTE_RECORDING_COUNT),
     translations: {},
+    pinned: false,
     createdAt: now,
     updatedAt: now,
   };
@@ -164,6 +256,85 @@ export const saveClinicNote = async (
   ]);
 
   return clinicNote;
+};
+
+export const savePendingRecording = async (
+  env: AuthEnv,
+  userId: string,
+  audio: File,
+) => {
+  const now = new Date().toISOString();
+  const recording: NoteRecording = {
+    id: `recording_${crypto.randomUUID()}`,
+    name: audio.name || "clinic-recording.webm",
+    type: audio.type || "audio/webm",
+    size: audio.size,
+    dataUrl: await fileToDataUrl(audio),
+    transcript: "",
+    createdAt: now,
+  };
+
+  await redisCommand(env, [
+    "SET",
+    getPendingRecordingKey(recording.id),
+    JSON.stringify({
+      ...recording,
+      userId,
+    }),
+    "EX",
+    PENDING_RECORDING_TTL_SECONDS,
+  ]);
+
+  return {
+    id: recording.id,
+    name: recording.name,
+    type: recording.type,
+    size: recording.size,
+    createdAt: recording.createdAt,
+  };
+};
+
+export const getPendingRecordingsForNote = async (
+  env: AuthEnv,
+  userId: string,
+  references: Array<{ id: string; transcript: string }>,
+) => {
+  const recordings = await Promise.all(
+    references.slice(0, MAX_NOTE_RECORDING_COUNT).map(async (reference) => {
+      const pendingRecording = parsePendingRecording(
+        await redisCommand(env, ["GET", getPendingRecordingKey(reference.id)]),
+      );
+
+      if (!pendingRecording || pendingRecording.userId !== userId) {
+        return null;
+      }
+
+      return {
+        id: pendingRecording.id,
+        name: pendingRecording.name,
+        type: pendingRecording.type,
+        size: pendingRecording.size,
+        dataUrl: pendingRecording.dataUrl,
+        transcript: reference.transcript || pendingRecording.transcript,
+        createdAt: pendingRecording.createdAt,
+      };
+    }),
+  );
+
+  return recordings.filter(
+    (recording): recording is NoteRecording => recording !== null,
+  );
+};
+
+export const deletePendingRecordings = async (
+  env: AuthEnv,
+  recordingIds: string[],
+) => {
+  await Promise.all(
+    recordingIds.map((recordingId) =>
+      redisCommand(env, ["DEL", getPendingRecordingKey(recordingId)]),
+    ),
+  );
 };
 
 export const saveClinicNoteRecord = async (env: AuthEnv, note: ClinicNote) => {
@@ -191,6 +362,23 @@ export const getClinicNote = async (
   return note;
 };
 
+export const deleteClinicNote = async (
+  env: AuthEnv,
+  userId: string,
+  noteId: string,
+) => {
+  const note = await getClinicNote(env, userId, noteId);
+
+  if (!note) {
+    return false;
+  }
+
+  await redisCommand(env, ["DEL", getNoteKey(noteId)]);
+  await redisCommand(env, ["LREM", getUserNotesKey(userId), 0, noteId]);
+
+  return true;
+};
+
 export const listClinicNotes = async (env: AuthEnv, userId: string) => {
   const ids = await redisCommand(env, [
     "LRANGE",
@@ -204,11 +392,9 @@ export const listClinicNotes = async (env: AuthEnv, userId: string) => {
   }
 
   const noteIds = ids.filter((id): id is string => typeof id === "string");
-  const values = await redisCommand(env, ["MGET", ...noteIds]);
-
-  if (!Array.isArray(values)) {
-    return [];
-  }
+  const values = await Promise.all(
+    noteIds.map((noteId) => redisCommand(env, ["GET", getNoteKey(noteId)])),
+  );
 
   return values
     .map(parseClinicNote)
@@ -222,6 +408,9 @@ export const summarizeClinicNote = (note: ClinicNote) => ({
   updatedAt: note.updatedAt,
   language_detected: note.note.language_detected,
   provider_used: note.note.provider_used,
+  recording_count: note.recordings.length,
+  pinned: note.pinned,
+  pinnedAt: note.pinnedAt,
   translation_languages: Object.values(note.translations).map(
     (translation) => translation.language,
   ),

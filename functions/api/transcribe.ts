@@ -1,4 +1,5 @@
 import { requireAuthenticatedUser, type AuthEnv } from "./auth";
+import { savePendingRecording } from "../../src/server/note-store";
 
 interface Env extends AuthEnv {
   PROXY_BASE_URL?: string;
@@ -127,7 +128,28 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
       );
     }
 
-    return jsonResponse(upstreamJson);
+    let recording: Awaited<ReturnType<typeof savePendingRecording>>;
+
+    try {
+      recording = await savePendingRecording(env, authResult.id, audio);
+    } catch (error) {
+      return jsonResponse(
+        {
+          error: "Unable to save recorded audio.",
+          details: error instanceof Error ? error.message : "Unknown error",
+        },
+        { status: 500 },
+      );
+    }
+
+    if (upstreamJson && typeof upstreamJson === "object" && !Array.isArray(upstreamJson)) {
+      return jsonResponse({
+        ...(upstreamJson as Record<string, unknown>),
+        recording,
+      });
+    }
+
+    return jsonResponse({ result: upstreamJson, recording });
   } catch (error) {
     return jsonResponse(
       {

@@ -10,6 +10,7 @@ type TranscriptionSegment = {
 type TranscriptionResponse = {
   text?: string;
   segments?: unknown;
+  recording?: unknown;
   [key: string]: unknown;
 };
 
@@ -19,6 +20,9 @@ type NoteResult = {
   saved_at?: unknown;
   updated_at?: unknown;
   translation_languages?: unknown;
+  recordings?: unknown;
+  pinned?: unknown;
+  pinned_at?: unknown;
   language_detected?: unknown;
   provider_used?: unknown;
   soap?: {
@@ -62,6 +66,19 @@ type SavedNoteSummary = {
   language_detected?: string;
   provider_used?: string;
   translation_languages?: string[];
+  recording_count?: number;
+  pinned?: boolean;
+  pinnedAt?: string;
+};
+
+type NoteRecording = {
+  id: string;
+  name: string;
+  type: string;
+  size: number;
+  createdAt: string;
+  transcript: string;
+  dataUrl?: string;
 };
 
 type SavedNoteDetail = {
@@ -70,7 +87,10 @@ type SavedNoteDetail = {
   transcript: string;
   createdAt: string;
   updatedAt: string;
+  pinned?: boolean;
+  pinnedAt?: string;
   result: NoteResult;
+  recordings?: NoteRecording[];
   translations?: Record<
     string,
     {
@@ -119,6 +139,26 @@ const LANGUAGE_OPTIONS = [
 
 const AUTOSAVE_DELAY_MS = 600;
 
+const VIEW_PATHS: Record<AppView, string> = {
+  scribe: "/",
+  dashboard: "/dashboard",
+  note: "/note",
+};
+
+const getViewFromPathname = (pathname: string): AppView => {
+  const normalizedPath = pathname.replace(/\/+$/, "") || "/";
+
+  if (normalizedPath === VIEW_PATHS.dashboard) {
+    return "dashboard";
+  }
+
+  if (normalizedPath === VIEW_PATHS.note) {
+    return "note";
+  }
+
+  return "scribe";
+};
+
 const getAutosaveKey = (userId: string) => `clinicscribe.autosave.${userId}`;
 
 const getAutosaveTimeLabel = () =>
@@ -132,6 +172,95 @@ const asNoteResultDraft = (value: unknown) =>
   value && typeof value === "object" && !Array.isArray(value)
     ? (value as NoteResult)
     : null;
+
+const asRecord = (value: unknown) =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+
+const toRecording = (
+  value: unknown,
+  transcriptFallback = "",
+): NoteRecording | null => {
+  const recording = asRecord(value);
+
+  if (
+    typeof recording?.id !== "string" ||
+    typeof recording.name !== "string" ||
+    typeof recording.type !== "string" ||
+    typeof recording.createdAt !== "string" ||
+    typeof recording.size !== "number"
+  ) {
+    return null;
+  }
+
+  return {
+    id: recording.id,
+    name: recording.name,
+    type: recording.type,
+    size: recording.size,
+    createdAt: recording.createdAt,
+    transcript:
+      typeof recording.transcript === "string"
+        ? recording.transcript
+        : transcriptFallback,
+    dataUrl:
+      typeof recording.dataUrl === "string" ? recording.dataUrl : undefined,
+  };
+};
+
+const getNoteRecordings = (value: unknown) => {
+  const record = asRecord(value);
+  const recordings = record?.recordings;
+
+  return Array.isArray(recordings)
+    ? recordings
+        .map((recording) => toRecording(recording))
+        .filter((recording): recording is NoteRecording => recording !== null)
+    : [];
+};
+
+const getSavedNoteSummary = (
+  note: NoteResult | null,
+  fallbackTitle = "",
+): SavedNoteSummary | null => {
+  const id = getNoteId(note);
+
+  if (!id) {
+    return null;
+  }
+
+  const savedAt = getStringValue(note?.saved_at);
+  const updatedAt = getStringValue(note?.updated_at) || savedAt;
+  const now = new Date().toISOString();
+
+  return {
+    id,
+    title: fallbackTitle || getStringValue(note?.title) || "Clinic note",
+    createdAt: savedAt || updatedAt || now,
+    updatedAt: updatedAt || savedAt || now,
+    language_detected: getStringValue(note?.language_detected) || undefined,
+    provider_used: getStringValue(note?.provider_used) || undefined,
+    recording_count: getNoteRecordings(note).length,
+    pinned: note?.pinned === true,
+    pinnedAt: getStringValue(note?.pinned_at) || undefined,
+    translation_languages: getTranslationLanguages(note),
+  };
+};
+
+const upsertSavedNoteSummary = (
+  notes: SavedNoteSummary[],
+  note: SavedNoteSummary,
+) => sortSavedNotes([note, ...notes.filter((savedNote) => savedNote.id !== note.id)]);
+
+const sortSavedNotes = (notes: SavedNoteSummary[]) =>
+  [...notes].sort((left, right) => {
+    if (left.pinned !== right.pinned) {
+      return left.pinned ? -1 : 1;
+    }
+
+    return Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
+  });
 
 const getSupportedMimeType = () => {
   const types = [
@@ -403,8 +532,14 @@ function App() {
   const [noteResult, setNoteResult] = useState<NoteResult | null>(null);
   const [baseNoteResult, setBaseNoteResult] = useState<NoteResult | null>(null);
   const [currentNoteTitle, setCurrentNoteTitle] = useState("");
+  const [pendingRecordings, setPendingRecordings] = useState<NoteRecording[]>([]);
+  const [currentNoteRecordings, setCurrentNoteRecordings] = useState<
+    NoteRecording[]
+  >([]);
   const [activeNoteLanguage, setActiveNoteLanguage] = useState("Original");
-  const [activeView, setActiveView] = useState<AppView>("scribe");
+  const [activeView, setActiveView] = useState<AppView>(() =>
+    getViewFromPathname(window.location.pathname),
+  );
   const [savedNotes, setSavedNotes] = useState<SavedNoteSummary[]>([]);
   const [isLoadingNotes, setIsLoadingNotes] = useState(false);
   const [vaultError, setVaultError] = useState("");
@@ -514,6 +649,8 @@ function App() {
       setTranscript("");
       setNoteResult(null);
       setBaseNoteResult(null);
+      setPendingRecordings([]);
+      setCurrentNoteRecordings([]);
       setSavedNotes([]);
       setSelectedTranslationLanguage("");
       setNoteError("");
@@ -546,13 +683,37 @@ function App() {
         throw new Error(getErrorMessage(responseJson, "Unable to load note vault."));
       }
 
-      setSavedNotes(responseJson.notes);
+      const openNoteSummary = getSavedNoteSummary(
+        baseNoteResult ?? noteResult,
+        currentNoteTitle,
+      );
+      const notes = openNoteSummary
+        ? upsertSavedNoteSummary(responseJson.notes, openNoteSummary)
+        : sortSavedNotes(responseJson.notes);
+
+      setSavedNotes(notes);
+      return notes;
     } catch (notesError) {
       setVaultError(
         notesError instanceof Error ? notesError.message : "Unable to load notes.",
       );
+      return [];
     } finally {
       setIsLoadingNotes(false);
+    }
+  };
+
+  const navigateToView = (view: AppView) => {
+    const nextPath = VIEW_PATHS[view];
+
+    if (window.location.pathname !== nextPath) {
+      window.history.pushState(null, "", nextPath);
+    }
+
+    setActiveView(view);
+
+    if (view === "dashboard") {
+      void loadSavedNotes();
     }
   };
 
@@ -578,14 +739,136 @@ function App() {
       setBaseNoteResult(note.result);
       setNoteResult(note.result);
       setCurrentNoteTitle(note.title);
+      setPendingRecordings([]);
+      setCurrentNoteRecordings(note.recordings ?? []);
       setActiveNoteLanguage("Original");
       setSelectedTranslationLanguage("");
       setTranslationStatus("");
       setNoteError("");
-      setActiveView("note");
+      navigateToView("note");
     } catch (openError) {
       setVaultError(
         openError instanceof Error ? openError.message : "Unable to open note.",
+      );
+    }
+  };
+
+  const updateSavedNote = async (
+    noteId: string,
+    updates: { title?: string; pinned?: boolean },
+  ) => {
+    setVaultError("");
+
+    try {
+      const response = await fetch("/api/notes", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "same-origin",
+        body: JSON.stringify({ id: noteId, ...updates }),
+      });
+      const responseJson = (await parseJsonResponse(
+        response,
+        "The notes endpoint returned invalid JSON.",
+      )) as { note?: SavedNoteSummary; error?: string };
+
+      if (!response.ok || !responseJson.note) {
+        throw new Error(getErrorMessage(responseJson, "Unable to update saved note."));
+      }
+
+      const updatedNote = responseJson.note;
+
+      setSavedNotes((currentNotes) =>
+        upsertSavedNoteSummary(currentNotes, updatedNote),
+      );
+
+      if (getNoteId(baseNoteResult ?? noteResult) === noteId) {
+        if (updates.title) {
+          setCurrentNoteTitle(updates.title);
+        }
+
+        setBaseNoteResult((current) =>
+          current
+            ? {
+                ...current,
+                title: updatedNote.title,
+                pinned: updatedNote.pinned,
+                pinned_at: updatedNote.pinnedAt,
+              }
+            : current,
+        );
+        setNoteResult((current) =>
+          current
+            ? {
+                ...current,
+                title: updatedNote.title,
+                pinned: updatedNote.pinned,
+                pinned_at: updatedNote.pinnedAt,
+              }
+            : current,
+        );
+      }
+    } catch (updateError) {
+      setVaultError(
+        updateError instanceof Error
+          ? updateError.message
+          : "Unable to update saved note.",
+      );
+    }
+  };
+
+  const renameSavedNote = (note: SavedNoteSummary) => {
+    const nextTitle = window.prompt("Rename note", note.title)?.trim();
+
+    if (!nextTitle || nextTitle === note.title) {
+      return;
+    }
+
+    void updateSavedNote(note.id, { title: nextTitle });
+  };
+
+  const togglePinnedNote = (note: SavedNoteSummary) => {
+    void updateSavedNote(note.id, { pinned: !note.pinned });
+  };
+
+  const deleteSavedNote = async (note: SavedNoteSummary) => {
+    if (!window.confirm(`Delete "${note.title}"?`)) {
+      return;
+    }
+
+    setVaultError("");
+
+    try {
+      const response = await fetch(`/api/notes?id=${encodeURIComponent(note.id)}`, {
+        method: "DELETE",
+        credentials: "same-origin",
+      });
+      const responseJson = await parseJsonResponse(
+        response,
+        "The notes endpoint returned invalid JSON.",
+      );
+
+      if (!response.ok) {
+        throw new Error(getErrorMessage(responseJson, "Unable to delete saved note."));
+      }
+
+      setSavedNotes((currentNotes) =>
+        currentNotes.filter((savedNote) => savedNote.id !== note.id),
+      );
+
+      if (getNoteId(baseNoteResult ?? noteResult) === note.id) {
+        setNoteResult(null);
+        setBaseNoteResult(null);
+        setCurrentNoteRecordings([]);
+        setCurrentNoteTitle("");
+        navigateToView("dashboard");
+      }
+    } catch (deleteError) {
+      setVaultError(
+        deleteError instanceof Error
+          ? deleteError.message
+          : "Unable to delete saved note.",
       );
     }
   };
@@ -722,6 +1005,10 @@ function App() {
       const formattedTranscript = formatTranscript(
         responseJson as TranscriptionResponse,
       );
+      const recording = toRecording(
+        (responseJson as TranscriptionResponse).recording,
+        formattedTranscript,
+      );
 
       if (!formattedTranscript) {
         throw new Error("No transcript text was returned.");
@@ -733,8 +1020,12 @@ function App() {
           ? `${currentTranscript.trimEnd()}\n\n${formattedTranscript}`
           : formattedTranscript,
       );
+      setPendingRecordings((currentRecordings) =>
+        recording ? [...currentRecordings, recording] : currentRecordings,
+      );
       setNoteResult(null);
       setBaseNoteResult(null);
+      setCurrentNoteRecordings([]);
       setCurrentNoteTitle("");
       setActiveNoteLanguage("Original");
       setSelectedTranslationLanguage("");
@@ -843,6 +1134,8 @@ function App() {
     setTranscript("");
     setNoteResult(null);
     setBaseNoteResult(null);
+    setPendingRecordings([]);
+    setCurrentNoteRecordings([]);
     setCurrentNoteTitle("");
     setActiveNoteLanguage("Original");
     setSelectedTranslationLanguage("");
@@ -877,7 +1170,13 @@ function App() {
           "Content-Type": "application/json",
         },
         credentials: "same-origin",
-        body: JSON.stringify({ transcript }),
+        body: JSON.stringify({
+          transcript,
+          recordings: pendingRecordings.map((recording) => ({
+            id: recording.id,
+            transcript: recording.transcript,
+          })),
+        }),
       });
 
       const responseText = await response.text();
@@ -896,15 +1195,34 @@ function App() {
       }
 
       const generatedNote = responseJson as NoteResult;
+      const savedNoteSummary = getSavedNoteSummary(generatedNote);
+
+      if (!savedNoteSummary) {
+        throw new Error(
+          "The note was generated, but the server did not return a saved note ID.",
+        );
+      }
 
       setNoteResult(generatedNote);
       setBaseNoteResult(generatedNote);
+      setPendingRecordings([]);
+      setCurrentNoteRecordings(getNoteRecordings(generatedNote));
       setCurrentNoteTitle(getStringValue(generatedNote.title));
       setActiveNoteLanguage("Original");
       setSelectedTranslationLanguage("");
       setTranslationStatus("Saved to your note vault.");
-      setActiveView("note");
-      void loadSavedNotes();
+      navigateToView("note");
+      setSavedNotes((currentNotes) =>
+        upsertSavedNoteSummary(currentNotes, savedNoteSummary),
+      );
+
+      const loadedNotes = await loadSavedNotes();
+
+      if (!loadedNotes.some((savedNote) => savedNote.id === savedNoteSummary.id)) {
+        setSavedNotes((currentNotes) =>
+          upsertSavedNoteSummary(currentNotes, savedNoteSummary),
+        );
+      }
     } catch (noteGenerationError) {
       setNoteError(
         noteGenerationError instanceof Error
@@ -978,6 +1296,24 @@ function App() {
   }, [currentUser]);
 
   useEffect(() => {
+    const handlePopState = () => {
+      const nextView = getViewFromPathname(window.location.pathname);
+
+      setActiveView(nextView);
+
+      if (currentUser && nextView === "dashboard") {
+        void loadSavedNotes();
+      }
+    };
+
+    window.addEventListener("popstate", handlePopState);
+
+    return () => {
+      window.removeEventListener("popstate", handlePopState);
+    };
+  }, [currentUser]);
+
+  useEffect(() => {
     if (!currentUser) {
       setHasHydratedAutosave(false);
       return;
@@ -1007,16 +1343,13 @@ function App() {
       const draft = parsedDraft as Record<string, unknown>;
       const restoredNote = asNoteResultDraft(draft.noteResult);
       const restoredBaseNote = asNoteResultDraft(draft.baseNoteResult);
-      const restoredView =
-        draft.activeView === "note" && restoredNote
-          ? "note"
-          : draft.activeView === "dashboard"
-            ? "dashboard"
-            : "scribe";
-
       setTranscript(typeof draft.transcript === "string" ? draft.transcript : "");
       setNoteResult(restoredNote);
       setBaseNoteResult(restoredBaseNote);
+      setPendingRecordings(getNoteRecordings({ recordings: draft.pendingRecordings }));
+      setCurrentNoteRecordings(
+        getNoteRecordings({ recordings: draft.currentNoteRecordings }),
+      );
       setCurrentNoteTitle(
         typeof draft.currentNoteTitle === "string" ? draft.currentNoteTitle : "",
       );
@@ -1030,7 +1363,6 @@ function App() {
           ? draft.selectedTranslationLanguage
           : "",
       );
-      setActiveView(restoredView);
       setAutosaveStatus("Draft restored from autosave");
     } catch {
       setAutosaveStatus("Autosave unavailable");
@@ -1050,6 +1382,8 @@ function App() {
           transcript.trim().length > 0 ||
           Boolean(noteResult) ||
           Boolean(baseNoteResult) ||
+          pendingRecordings.length > 0 ||
+          currentNoteRecordings.length > 0 ||
           currentNoteTitle.trim().length > 0;
 
         if (!hasDraft) {
@@ -1065,6 +1399,8 @@ function App() {
             transcript,
             noteResult,
             baseNoteResult,
+            pendingRecordings,
+            currentNoteRecordings,
             currentNoteTitle,
             activeNoteLanguage,
             selectedTranslationLanguage,
@@ -1084,10 +1420,12 @@ function App() {
     activeNoteLanguage,
     activeView,
     baseNoteResult,
+    currentNoteRecordings,
     currentNoteTitle,
     currentUser,
     hasHydratedAutosave,
     noteResult,
+    pendingRecordings,
     selectedTranslationLanguage,
     transcript,
   ]);
@@ -1283,6 +1621,8 @@ function App() {
     transcript.trim().length > 0 ||
     Boolean(noteResult) ||
     Boolean(baseNoteResult) ||
+    pendingRecordings.length > 0 ||
+    currentNoteRecordings.length > 0 ||
     currentNoteTitle.trim().length > 0;
   const selectedLanguageLabel = selectedTranslationLanguage
     ? `Translate to ${selectedTranslationLanguage}`
@@ -1292,6 +1632,18 @@ function App() {
       ? `Translating to ${selectedTranslationLanguage}...`
       : "Translating..."
     : "Translate";
+  const pageTitle =
+    activeView === "dashboard"
+      ? "Note vault"
+      : activeView === "note"
+        ? "Clinical note"
+        : "ClinicScribe";
+  const pageDescription =
+    activeView === "dashboard"
+      ? "Your saved ClinicScribe notes stay tied to this account."
+      : activeView === "note"
+        ? noteHeading || "Review the generated documentation."
+        : "Clinical notes faster, clearer, and ready for review.";
 
   return (
     <main className="min-h-screen bg-zinc-100 px-4 py-8 text-zinc-950 sm:px-6 lg:px-8">
@@ -1301,10 +1653,10 @@ function App() {
             <div>
               <p className="text-sm font-medium text-zinc-500">ClinicScribe</p>
               <h1 className="mt-2 text-2xl font-semibold tracking-normal text-zinc-950">
-                ClinicScribe
+                {pageTitle}
               </h1>
               <p className="mt-2 text-sm text-zinc-500">
-                Clinical notes faster, clearer, and ready for review.
+                {pageDescription}
               </p>
             </div>
 
@@ -1324,56 +1676,42 @@ function App() {
           </div>
 
           <div className="mb-6 flex flex-wrap gap-2">
-            <button
-              className={`rounded-lg px-4 py-2 text-sm font-semibold transition ${
-                activeView === "scribe"
-                  ? "bg-zinc-950 text-white"
-                  : "border border-zinc-300 text-zinc-700 hover:border-zinc-400 hover:bg-zinc-50"
-              }`}
-              onClick={() => setActiveView("scribe")}
-              type="button"
-            >
-              Home
-            </button>
-            <button
-              className={`rounded-lg px-4 py-2 text-sm font-semibold transition ${
-                activeView === "dashboard"
-                  ? "bg-zinc-950 text-white"
-                  : "border border-zinc-300 text-zinc-700 hover:border-zinc-400 hover:bg-zinc-50"
-              }`}
-              onClick={() => {
-                setActiveView("dashboard");
-                void loadSavedNotes();
-              }}
-              type="button"
-            >
-              Dashboard
-            </button>
+            {activeView !== "scribe" ? (
+              <button
+                className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
+                onClick={() => navigateToView("scribe")}
+                type="button"
+              >
+                Return home
+              </button>
+            ) : null}
+
+            {activeView !== "dashboard" ? (
+              <button
+                className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
+                onClick={() => navigateToView("dashboard")}
+                type="button"
+              >
+                Open dashboard
+              </button>
+            ) : null}
+
+            {activeView === "dashboard" ? (
+              <button
+                className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
+                disabled={isLoadingNotes}
+                onClick={() => void loadSavedNotes()}
+                type="button"
+              >
+                {isLoadingNotes ? "Refreshing..." : "Refresh"}
+              </button>
+            ) : null}
           </div>
 
           {activeView === "dashboard" ? (
             <div className="rounded-2xl border border-zinc-200 p-5">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                  <h2 className="text-xl font-semibold tracking-normal text-zinc-950">
-                    Note vault
-                  </h2>
-                  <p className="mt-1 text-sm text-zinc-500">
-                    Your saved ClinicScribe notes stay tied to this account.
-                  </p>
-                </div>
-                <button
-                  className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
-                  disabled={isLoadingNotes}
-                  onClick={() => void loadSavedNotes()}
-                  type="button"
-                >
-                  {isLoadingNotes ? "Refreshing..." : "Refresh"}
-                </button>
-              </div>
-
               {vaultError ? (
-                <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
                   {vaultError}
                 </div>
               ) : null}
@@ -1386,20 +1724,58 @@ function App() {
                 ) : null}
 
                 {savedNotes.map((savedNote) => (
-                  <button
-                    className="block w-full rounded-xl border border-zinc-200 bg-white px-4 py-3 text-left transition hover:border-zinc-400 hover:bg-zinc-50"
+                  <div
+                    className="rounded-xl border border-zinc-200 bg-white px-4 py-3 transition hover:border-zinc-400 hover:bg-zinc-50"
                     key={savedNote.id}
-                    onClick={() => void openSavedNote(savedNote.id)}
-                    type="button"
                   >
-                    <p className="font-semibold text-zinc-950">{savedNote.title}</p>
-                    <p className="mt-1 text-sm text-zinc-500">
-                      {formatDate(savedNote.createdAt)}
-                      {savedNote.translation_languages?.length
-                        ? ` - ${savedNote.translation_languages.join(", ")}`
-                        : ""}
-                    </p>
-                  </button>
+                    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                      <button
+                        className="min-w-0 flex-1 text-left"
+                        onClick={() => void openSavedNote(savedNote.id)}
+                        type="button"
+                      >
+                        <p className="font-semibold text-zinc-950">
+                          {savedNote.pinned ? "Pinned - " : ""}
+                          {savedNote.title}
+                        </p>
+                        <p className="mt-1 text-sm text-zinc-500">
+                          {formatDate(savedNote.createdAt)}
+                          {savedNote.recording_count
+                            ? ` - ${savedNote.recording_count} recording${
+                                savedNote.recording_count === 1 ? "" : "s"
+                              }`
+                            : ""}
+                          {savedNote.translation_languages?.length
+                            ? ` - ${savedNote.translation_languages.join(", ")}`
+                            : ""}
+                        </p>
+                      </button>
+
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          className="rounded-lg border border-zinc-300 px-3 py-2 text-xs font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-white"
+                          onClick={() => togglePinnedNote(savedNote)}
+                          type="button"
+                        >
+                          {savedNote.pinned ? "Unpin" : "Pin"}
+                        </button>
+                        <button
+                          className="rounded-lg border border-zinc-300 px-3 py-2 text-xs font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-white"
+                          onClick={() => renameSavedNote(savedNote)}
+                          type="button"
+                        >
+                          Rename
+                        </button>
+                        <button
+                          className="rounded-lg border border-red-200 px-3 py-2 text-xs font-semibold text-red-700 transition hover:border-red-300 hover:bg-red-50"
+                          onClick={() => void deleteSavedNote(savedNote)}
+                          type="button"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  </div>
                 ))}
               </div>
             </div>
@@ -1434,6 +1810,11 @@ function App() {
                 {isUploading ? "..." : ""}
               </p>
               <p className="mt-1 text-xs text-zinc-400">{autosaveStatus}</p>
+              {pendingRecordings.length > 0 ? (
+                <p className="mt-1 text-xs text-zinc-400">
+                  Recorded clips ready to save: {pendingRecordings.length}
+                </p>
+              ) : null}
             </div>
 
             <div className="flex flex-col gap-2 sm:flex-row">
@@ -1499,7 +1880,7 @@ function App() {
 
             <button
               className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
-              onClick={() => setActiveView("scribe")}
+              onClick={() => navigateToView("scribe")}
               type="button"
             >
               Return home
@@ -1635,6 +2016,42 @@ function App() {
                   </div>
                 ) : null}
               </section>
+
+              {currentNoteRecordings.length > 0 ? (
+                <section className="rounded-2xl border border-zinc-200 p-5">
+                  <h3 className="text-lg font-semibold text-zinc-950">
+                    Recorded audio
+                  </h3>
+                  <div className="mt-4 space-y-3">
+                    {currentNoteRecordings.map((recording, index) => (
+                      <div
+                        className="rounded-xl border border-zinc-200 bg-zinc-50 p-3"
+                        key={recording.id}
+                      >
+                        <p className="text-sm font-semibold text-zinc-900">
+                          Recording {index + 1}
+                        </p>
+                        <p className="mt-1 text-xs text-zinc-500">
+                          {formatDate(recording.createdAt)} -{" "}
+                          {Math.max(1, Math.round(recording.size / 1024))} KB
+                        </p>
+                        {recording.dataUrl ? (
+                          <audio
+                            className="mt-3 w-full"
+                            controls
+                            preload="metadata"
+                            src={recording.dataUrl}
+                          />
+                        ) : (
+                          <p className="mt-3 text-sm text-zinc-500">
+                            Audio file saved without an inline preview.
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
 
               <section className="rounded-2xl border border-zinc-200 p-5">
                 <h3 className="mb-4 text-lg font-semibold text-zinc-950">SOAP</h3>

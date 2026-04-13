@@ -1,8 +1,11 @@
 import { requireAuthenticatedUser, type AuthEnv } from "./auth";
 import {
+  deletePendingRecordings,
+  getPendingRecordingsForNote,
   saveClinicNote,
   toNoteResponse,
   type NoteJson,
+  type NoteRecording,
   type ProviderUsed,
 } from "../../src/server/note-store";
 
@@ -477,6 +480,29 @@ const toStringArray = (value: unknown) =>
     ? value.filter((item): item is string => typeof item === "string")
     : [];
 
+const getRecordingReferences = (value: unknown) =>
+  Array.isArray(value)
+    ? value
+        .map((item) => {
+          const record = asRecord(item);
+          const id = typeof record?.id === "string" ? record.id.trim() : "";
+
+          if (!id) {
+            return null;
+          }
+
+          return {
+            id,
+            transcript:
+              typeof record?.transcript === "string" ? record.transcript : "",
+          };
+        })
+        .filter(
+          (reference): reference is { id: string; transcript: string } =>
+            reference !== null,
+        )
+    : [];
+
 const normalizeNoteJson = (value: unknown, providerUsed: ProviderUsed): NoteJson => {
   const source =
     value && typeof value === "object" ? (value as Record<string, unknown>) : {};
@@ -749,6 +775,31 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     );
   }
 
+  const recordingReferences = getRecordingReferences(
+    body && typeof body === "object"
+      ? (body as Record<string, unknown>).recordings
+      : undefined,
+  );
+  let recordings: NoteRecording[] = [];
+
+  if (recordingReferences.length > 0) {
+    try {
+      recordings = await getPendingRecordingsForNote(
+        env,
+        authResult.id,
+        recordingReferences,
+      );
+    } catch (error) {
+      return jsonResponse(
+        {
+          error: "Unable to attach recorded audio to the note.",
+          details: getErrorMessage(error),
+        },
+        { status: 500 },
+      );
+    }
+  }
+
   let generatedNote: NoteJson;
 
   try {
@@ -782,12 +833,42 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     }
   }
 
-  const savedNote = await saveClinicNote(
-    env,
-    authResult,
-    trimmedTranscript,
-    generatedNote,
-  );
+  let savedNote: Awaited<ReturnType<typeof saveClinicNote>>;
+
+  try {
+    savedNote = await saveClinicNote(
+      env,
+      authResult,
+      trimmedTranscript,
+      generatedNote,
+      recordings,
+    );
+  } catch (error) {
+    logError("Redis note save failure", {
+      message: getErrorMessage(error),
+    });
+
+    return jsonResponse(
+      {
+        error: "Unable to save generated note to the note vault.",
+        details: getErrorMessage(error),
+      },
+      { status: 500 },
+    );
+  }
+
+  if (recordings.length > 0) {
+    try {
+      await deletePendingRecordings(
+        env,
+        recordings.map((recording) => recording.id),
+      );
+    } catch (error) {
+      logError("Pending recording cleanup failure", {
+        message: getErrorMessage(error),
+      });
+    }
+  }
 
   return jsonResponse(toNoteResponse(savedNote));
 };
