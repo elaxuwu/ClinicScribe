@@ -1526,7 +1526,11 @@ function App() {
       <main className="min-h-screen bg-zinc-100 px-4 py-8 text-zinc-950 sm:px-6 lg:px-8">
         <section className="mx-auto flex min-h-[calc(100vh-4rem)] max-w-md items-center">
           <div className="w-full rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-sm sm:p-8">
-            <p className="text-sm font-medium text-zinc-500">ClinicScribe</p>
+            <img
+              alt="ClinicScribe"
+              className="h-12 w-auto object-contain"
+              src="/brand/logo.png"
+            />
             <h1 className="mt-2 text-2xl font-semibold tracking-normal text-zinc-950">
               {isSignup ? "Create your account" : "Sign in"}
             </h1>
@@ -1717,8 +1721,12 @@ function App() {
         <div className="rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-sm sm:p-8">
           <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
             <div>
-              <p className="text-sm font-medium text-zinc-500">ClinicScribe</p>
-              <h1 className="mt-2 text-2xl font-semibold tracking-normal text-zinc-950">
+              <img
+                alt="ClinicScribe"
+                className="h-14 w-auto object-contain"
+                src="/brand/logo.png"
+              />
+              <h1 className="mt-4 text-2xl font-semibold tracking-normal text-zinc-950">
                 {pageTitle}
               </h1>
               <p className="mt-2 text-sm text-zinc-500">
