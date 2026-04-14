@@ -138,6 +138,8 @@ const LANGUAGE_OPTIONS = [
 ];
 
 const AUTOSAVE_DELAY_MS = 600;
+const BRAND_LOGO_SRC = "/brand/logo.png?v=2";
+const SITE_LOGO_SRC = "/brand/logoNoText.png?v=2";
 
 const VIEW_PATHS: Record<AppView, string> = {
   scribe: "/",
@@ -1541,12 +1543,21 @@ function App() {
       <main className="min-h-screen bg-zinc-100 px-4 py-8 text-zinc-950 sm:px-6 lg:px-8">
         <section className="mx-auto flex min-h-[calc(100vh-4rem)] max-w-md items-center">
           <div className="w-full rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-sm sm:p-8">
-            <img
-              alt="ClinicScribe"
-              className="h-12 w-auto object-contain"
-              src="/brand/logo.png"
-            />
-            <h1 className="mt-2 text-2xl font-semibold tracking-normal text-zinc-950">
+            <div className="flex items-center gap-4">
+              <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-50">
+                <img
+                  alt="ClinicScribe"
+                  className="h-14 w-14 object-contain"
+                  src={SITE_LOGO_SRC}
+                />
+              </div>
+              <img
+                alt="ClinicScribe"
+                className="h-16 min-w-0 max-w-[14rem] object-contain sm:h-20"
+                src={BRAND_LOGO_SRC}
+              />
+            </div>
+            <h1 className="mt-5 text-2xl font-semibold tracking-normal text-zinc-950">
               {isSignup ? "Create your account" : "Sign in"}
             </h1>
             <p className="mt-2 text-sm leading-6 text-zinc-500">
@@ -1735,22 +1746,38 @@ function App() {
     <main className="min-h-screen bg-zinc-100 px-4 py-8 text-zinc-950 sm:px-6 lg:px-8">
       <section className="mx-auto flex max-w-5xl flex-col gap-6">
         <div className="rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-sm sm:p-8">
-          <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-            <div>
-              <img
-                alt="ClinicScribe"
-                className="h-14 w-auto object-contain"
-                src="/brand/logo.png"
-              />
-              <h1 className="mt-4 text-2xl font-semibold tracking-normal text-zinc-950">
-                {pageTitle}
-              </h1>
-              <p className="mt-2 text-sm text-zinc-500">
-                {pageDescription}
-              </p>
+          <div className="mb-6 flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+            <div className="flex min-w-0 items-start gap-4">
+              <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-50">
+                <img
+                  alt="ClinicScribe"
+                  className="h-14 w-14 object-contain"
+                  src={SITE_LOGO_SRC}
+                />
+              </div>
+              <div className="min-w-0">
+                {activeView === "scribe" ? (
+                  <img
+                    alt="ClinicScribe"
+                    className="h-16 max-w-full object-contain sm:h-20"
+                    src={BRAND_LOGO_SRC}
+                  />
+                ) : (
+                  <h1 className="text-2xl font-semibold tracking-normal text-zinc-950">
+                    {pageTitle}
+                  </h1>
+                )}
+                <p
+                  className={`${
+                    activeView === "scribe" ? "mt-3" : "mt-2"
+                  } text-sm text-zinc-500`}
+                >
+                  {pageDescription}
+                </p>
+              </div>
             </div>
 
-            <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm">
+            <div className="shrink-0 rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm">
               <p className="font-medium text-zinc-700">Signed in</p>
               <p className="mt-1 text-zinc-950">{currentUser.name}</p>
               <p className="mt-1 text-xs text-zinc-500">{currentUser.email}</p>
