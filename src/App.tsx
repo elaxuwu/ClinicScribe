@@ -139,7 +139,6 @@ const LANGUAGE_OPTIONS = [
 
 const AUTOSAVE_DELAY_MS = 600;
 const BRAND_LOGO_SRC = "/brand/logo.png?v=2";
-const SITE_LOGO_SRC = "/brand/logoNoText.png?v=2";
 
 const VIEW_PATHS: Record<AppView, string> = {
   scribe: "/",
@@ -1544,13 +1543,6 @@ function App() {
         <section className="mx-auto flex min-h-[calc(100vh-4rem)] max-w-md items-center">
           <div className="w-full rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-sm sm:p-8">
             <div className="flex items-center gap-4">
-              <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-50">
-                <img
-                  alt="ClinicScribe"
-                  className="h-14 w-14 object-contain"
-                  src={SITE_LOGO_SRC}
-                />
-              </div>
               <img
                 alt="ClinicScribe"
                 className="h-16 min-w-0 max-w-[14rem] object-contain sm:h-20"
@@ -1748,13 +1740,6 @@ function App() {
         <div className="rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-sm sm:p-8">
           <div className="mb-6 flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
             <div className="flex min-w-0 items-start gap-4">
-              <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-50">
-                <img
-                  alt="ClinicScribe"
-                  className="h-14 w-14 object-contain"
-                  src={SITE_LOGO_SRC}
-                />
-              </div>
               <div className="min-w-0">
                 {activeView === "scribe" ? (
                   <img
