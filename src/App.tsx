@@ -1899,7 +1899,7 @@ function App() {
               setSelectedTranslationLanguage("");
               setTranslationStatus("");
             }}
-            placeholder="Vietnamese or English clinic transcript will appear here..."
+            placeholder="Transcript will appear here..."
             value={transcript}
           />
 
