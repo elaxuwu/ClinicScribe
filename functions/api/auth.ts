@@ -1,6 +1,10 @@
 export type AuthEnv = {
   UPSTASH_DATABASE_URL?: string;
   UPSTASH_DATABASE_KEY?: string;
+  SUPABASE_URL?: string;
+  SUPABASE_PUBLISHABLE_KEY?: string;
+  VITE_SUPABASE_URL?: string;
+  VITE_SUPABASE_PUBLISHABLE_KEY?: string;
 };
 
 export type PublicUser = {
@@ -8,6 +12,7 @@ export type PublicUser = {
   email: string;
   name: string;
   createdAt: string;
+  accessToken?: string;
 };
 
 type StoredUser = PublicUser & {
@@ -24,6 +29,13 @@ type StoredSession = {
 type UpstashResponse = {
   result?: unknown;
   error?: string;
+};
+
+type SupabaseUserResponse = {
+  id?: unknown;
+  email?: unknown;
+  created_at?: unknown;
+  user_metadata?: unknown;
 };
 
 const SESSION_COOKIE_NAME = "clinicscribe_session";
@@ -70,6 +82,27 @@ const getRedisConfig = (env: AuthEnv) => {
     throw new AuthServiceError(
       "UPSTASH_DATABASE_URL must be the Upstash Redis HTTPS REST URL.",
     );
+  }
+
+  return { url, key };
+};
+
+const getSupabaseConfig = (env: AuthEnv) => {
+  const url = (env.SUPABASE_URL ?? env.VITE_SUPABASE_URL)
+    ?.trim()
+    .replace(/\/+$/, "");
+  const key = (
+    env.SUPABASE_PUBLISHABLE_KEY ?? env.VITE_SUPABASE_PUBLISHABLE_KEY
+  )?.trim();
+
+  if (!url || !key) {
+    throw new AuthServiceError(
+      "Missing SUPABASE_URL or SUPABASE_PUBLISHABLE_KEY.",
+    );
+  }
+
+  if (!url.startsWith("https://")) {
+    throw new AuthServiceError("SUPABASE_URL must be an HTTPS URL.");
   }
 
   return { url, key };
@@ -259,6 +292,82 @@ const makeSessionCookie = (
 const makeExpiredSessionCookie = (request: Request) =>
   makeSessionCookie(request, "", 0);
 
+const getBearerToken = (request: Request) => {
+  const authorization = request.headers.get("Authorization") ?? "";
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+
+  return match?.[1]?.trim() || "";
+};
+
+const getNameFromSupabaseMetadata = (
+  metadata: unknown,
+  email: string,
+) => {
+  const record =
+    metadata && typeof metadata === "object" && !Array.isArray(metadata)
+      ? (metadata as Record<string, unknown>)
+      : {};
+
+  const name =
+    typeof record.name === "string"
+      ? record.name.trim()
+      : typeof record.full_name === "string"
+        ? record.full_name.trim()
+        : "";
+
+  return name || email;
+};
+
+const verifySupabaseUser = async (
+  request: Request,
+  env: AuthEnv,
+): Promise<PublicUser | null> => {
+  const accessToken = getBearerToken(request);
+
+  if (!accessToken) {
+    return null;
+  }
+
+  const { url, key } = getSupabaseConfig(env);
+  const response = await fetch(`${url}/auth/v1/user`, {
+    headers: {
+      apikey: key,
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (response.status === 401 || response.status === 403) {
+    return null;
+  }
+
+  let payload: SupabaseUserResponse;
+
+  try {
+    payload = (await response.json()) as SupabaseUserResponse;
+  } catch {
+    throw new AuthServiceError("Supabase returned an invalid auth response.");
+  }
+
+  if (!response.ok) {
+    throw new AuthServiceError("Unable to verify Supabase authentication.");
+  }
+
+  if (typeof payload.id !== "string" || typeof payload.email !== "string") {
+    return null;
+  }
+
+  return {
+    id: payload.id,
+    email: payload.email,
+    name: getNameFromSupabaseMetadata(payload.user_metadata, payload.email),
+    createdAt:
+      typeof payload.created_at === "string"
+        ? payload.created_at
+        : new Date().toISOString(),
+    accessToken,
+  };
+};
+
 const normalizeEmail = (email: string) => email.trim().toLowerCase();
 
 const validateAccountInput = (
@@ -389,6 +498,12 @@ const destroySession = async (request: Request, env: AuthEnv) => {
 };
 
 const getAuthenticatedUser = async (request: Request, env: AuthEnv) => {
+  const supabaseUser = await verifySupabaseUser(request, env);
+
+  if (supabaseUser || getBearerToken(request)) {
+    return supabaseUser;
+  }
+
   const token = parseCookies(request)[SESSION_COOKIE_NAME];
 
   if (!token) {

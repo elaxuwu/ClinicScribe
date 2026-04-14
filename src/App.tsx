@@ -1,4 +1,15 @@
+import { type User } from "@supabase/supabase-js";
 import { type FormEvent, useEffect, useRef, useState } from "react";
+import {
+  deleteEncounterRecord,
+  getEncounterDetail,
+  listEncounterSummaries,
+  saveEncounterRecord,
+  updateEncounterSummary,
+  type EncounterSummary,
+  type PatientDraft,
+} from "./utils/clinicRecords";
+import { supabase } from "./utils/supabase";
 
 type TranscriptionSegment = {
   speaker?: string | number;
@@ -25,6 +36,17 @@ type NoteResult = {
   pinned_at?: unknown;
   language_detected?: unknown;
   provider_used?: unknown;
+  patient?: {
+    name?: unknown;
+    age?: unknown;
+    gender?: unknown;
+    date_of_birth?: unknown;
+  };
+  encounter?: {
+    visit_date?: unknown;
+    chief_complaint?: unknown;
+    diagnosis?: unknown;
+  };
   soap?: {
     subjective?: unknown;
     objective?: unknown;
@@ -51,18 +73,19 @@ type CurrentUser = {
 
 type AuthMode = "login" | "signup";
 
-type AuthResponse = {
-  user?: CurrentUser;
-  error?: string;
-};
-
 type AppView = "scribe" | "dashboard" | "note";
 
 type SavedNoteSummary = {
   id: string;
+  legacyNoteId?: string;
   title: string;
   createdAt: string;
   updatedAt: string;
+  patientName?: string;
+  patientAge?: number;
+  patientGender?: string;
+  diagnosis?: string;
+  visitDate?: string;
   language_detected?: string;
   provider_used?: string;
   translation_languages?: string[];
@@ -81,34 +104,6 @@ type NoteRecording = {
   dataUrl?: string;
 };
 
-type SavedNoteDetail = {
-  id: string;
-  title: string;
-  transcript: string;
-  createdAt: string;
-  updatedAt: string;
-  pinned?: boolean;
-  pinnedAt?: string;
-  result: NoteResult;
-  recordings?: NoteRecording[];
-  translations?: Record<
-    string,
-    {
-      language: string;
-      note: NoteResult;
-      provider_used: string;
-      createdAt: string;
-      updatedAt: string;
-    }
-  >;
-};
-
-type NotesResponse = {
-  notes?: SavedNoteSummary[];
-  note?: SavedNoteDetail;
-  error?: string;
-};
-
 type TranslateResponse = {
   note_id?: string;
   title?: string;
@@ -118,6 +113,8 @@ type TranslateResponse = {
   error?: string;
   details?: unknown;
 };
+
+type DashboardSort = "newest" | "patient" | "diagnosis";
 
 const LANGUAGE_OPTIONS = [
   "Vietnamese",
@@ -227,34 +224,6 @@ const getNoteRecordings = (value: unknown) => {
         .map((recording) => toRecording(recording))
         .filter((recording): recording is NoteRecording => recording !== null)
     : [];
-};
-
-const getSavedNoteSummary = (
-  note: NoteResult | null,
-  fallbackTitle = "",
-): SavedNoteSummary | null => {
-  const id = getNoteId(note);
-
-  if (!id) {
-    return null;
-  }
-
-  const savedAt = getStringValue(note?.saved_at);
-  const updatedAt = getStringValue(note?.updated_at) || savedAt;
-  const now = new Date().toISOString();
-
-  return {
-    id,
-    title: fallbackTitle || getStringValue(note?.title) || "Clinic note",
-    createdAt: savedAt || updatedAt || now,
-    updatedAt: updatedAt || savedAt || now,
-    language_detected: getStringValue(note?.language_detected) || undefined,
-    provider_used: getStringValue(note?.provider_used) || undefined,
-    recording_count: getNoteRecordings(note).length,
-    pinned: note?.pinned === true,
-    pinnedAt: getStringValue(note?.pinned_at) || undefined,
-    translation_languages: getTranslationLanguages(note),
-  };
 };
 
 const upsertSavedNoteSummary = (
@@ -385,6 +354,110 @@ const getStringValue = (value: unknown) =>
   typeof value === "string" ? value.trim() : "";
 
 const getNoteId = (note: NoteResult | null) => getStringValue(note?.note_id);
+
+const toNoteRecord = (note: NoteResult | null): Record<string, unknown> =>
+  note && typeof note === "object" ? (note as Record<string, unknown>) : {};
+
+const getDateInputValue = (value: unknown) => {
+  const rawValue = getStringValue(value);
+
+  if (!rawValue) {
+    return "";
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(rawValue)) {
+    return rawValue;
+  }
+
+  const date = new Date(rawValue);
+
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString().slice(0, 10);
+};
+
+const getAgeInputValue = (value: unknown) => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+
+  return getStringValue(value);
+};
+
+const getPatientDraftFromNote = (note: NoteResult | null): PatientDraft => {
+  const patient = asRecord(note?.patient) ?? {};
+  const encounter = asRecord(note?.encounter) ?? {};
+  const soap = asRecord(note?.soap) ?? {};
+
+  return {
+    name: getStringValue(patient.name),
+    age: getAgeInputValue(patient.age),
+    gender: getStringValue(patient.gender),
+    visitDate: getDateInputValue(encounter.visit_date),
+    diagnosis:
+      getStringValue(encounter.diagnosis) || getStringValue(soap.assessment),
+  };
+};
+
+const toCurrentUser = (user: User): CurrentUser => {
+  const metadata = user.user_metadata;
+  const name =
+    typeof metadata?.name === "string"
+      ? metadata.name.trim()
+      : typeof metadata?.full_name === "string"
+        ? metadata.full_name.trim()
+        : "";
+
+  return {
+    id: user.id,
+    email: user.email ?? "",
+    name: name || user.email || "Clinic user",
+    createdAt: user.created_at,
+  };
+};
+
+const getSupabaseAccessToken = async () => {
+  const {
+    data: { session },
+    error,
+  } = await supabase.auth.getSession();
+
+  if (error || !session?.access_token) {
+    throw new Error("Sign in before using ClinicScribe.");
+  }
+
+  return session.access_token;
+};
+
+const apiFetch = async (input: RequestInfo | URL, init: RequestInit = {}) => {
+  const headers = new Headers(init.headers);
+  const accessToken = await getSupabaseAccessToken();
+
+  headers.set("Authorization", `Bearer ${accessToken}`);
+
+  return fetch(input, {
+    ...init,
+    headers,
+    credentials: "same-origin",
+  });
+};
+
+const toSavedNoteSummary = (encounter: EncounterSummary): SavedNoteSummary => ({
+  id: encounter.id,
+  legacyNoteId: encounter.legacyNoteId,
+  title: encounter.title,
+  createdAt: encounter.createdAt,
+  updatedAt: encounter.updatedAt,
+  patientName: encounter.patientName,
+  patientAge: encounter.patientAge,
+  patientGender: encounter.patientGender,
+  diagnosis: encounter.diagnosis,
+  visitDate: encounter.visitDate,
+  language_detected: encounter.languageDetected,
+  provider_used: encounter.providerUsed,
+  recording_count: encounter.recordingCount,
+  pinned: encounter.pinned,
+  pinnedAt: encounter.pinnedAt,
+  translation_languages: encounter.translationLanguages,
+});
 
 const getTranslationLanguages = (note: NoteResult | null) =>
   asStringArray(note?.translation_languages);
@@ -566,6 +639,12 @@ function App() {
   const [baseNoteResult, setBaseNoteResult] = useState<NoteResult | null>(null);
   const [currentNoteTitle, setCurrentNoteTitle] = useState("");
   const [currentNoteTranscript, setCurrentNoteTranscript] = useState("");
+  const [currentEncounterId, setCurrentEncounterId] = useState("");
+  const [patientDraft, setPatientDraft] = useState<PatientDraft>(() =>
+    getPatientDraftFromNote(null),
+  );
+  const [isSavingPatientRecord, setIsSavingPatientRecord] = useState(false);
+  const [patientRecordStatus, setPatientRecordStatus] = useState("");
   const [pendingRecordings, setPendingRecordings] = useState<NoteRecording[]>([]);
   const [currentNoteRecordings, setCurrentNoteRecordings] = useState<
     NoteRecording[]
@@ -577,6 +656,8 @@ function App() {
   const [savedNotes, setSavedNotes] = useState<SavedNoteSummary[]>([]);
   const [isLoadingNotes, setIsLoadingNotes] = useState(false);
   const [vaultError, setVaultError] = useState("");
+  const [dashboardSearch, setDashboardSearch] = useState("");
+  const [dashboardSort, setDashboardSort] = useState<DashboardSort>("newest");
   const [languageSearch, setLanguageSearch] = useState("");
   const [isLanguagePickerOpen, setIsLanguagePickerOpen] = useState(false);
   const [selectedTranslationLanguage, setSelectedTranslationLanguage] =
@@ -613,36 +694,47 @@ function App() {
     setIsAuthSubmitting(true);
 
     try {
-      const response = await fetch("/api/auth", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        credentials: "same-origin",
-        body: JSON.stringify({
-          action: authMode,
-          email: authEmail,
-          password: authPassword,
-          ...(authMode === "signup" ? { name: authName } : {}),
-        }),
-      });
-      const responseJson = (await parseJsonResponse(
-        response,
-        "The auth endpoint returned invalid JSON.",
-      )) as AuthResponse;
+      const email = authEmail.trim();
+      const password = authPassword;
 
-      if (!response.ok || !responseJson.user) {
-        throw new Error(
-          getErrorMessage(
-            responseJson,
-            authMode === "signup"
-              ? "Unable to create account."
-              : "Unable to sign in.",
-          ),
-        );
+      if (authMode === "signup") {
+        const { data, error: signUpError } = await supabase.auth.signUp({
+          email,
+          password,
+          options: {
+            data: {
+              name: authName.trim() || email,
+            },
+          },
+        });
+
+        if (signUpError) {
+          throw signUpError;
+        }
+
+        if (!data.session || !data.user) {
+          setAuthMode("login");
+          setAuthPassword("");
+          setAuthPasswordConfirmation("");
+          setAuthError("Account created. Confirm your email, then sign in.");
+          return;
+        }
+
+        setCurrentUser(toCurrentUser(data.user));
+      } else {
+        const { data, error: signInError } =
+          await supabase.auth.signInWithPassword({
+            email,
+            password,
+          });
+
+        if (signInError || !data.user) {
+          throw signInError ?? new Error("Unable to sign in.");
+        }
+
+        setCurrentUser(toCurrentUser(data.user));
       }
 
-      setCurrentUser(responseJson.user);
       setAuthPassword("");
       setAuthPasswordConfirmation("");
       setAuthError("");
@@ -662,21 +754,10 @@ function App() {
     setIsLoggingOut(true);
 
     try {
-      const response = await fetch("/api/auth", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        credentials: "same-origin",
-        body: JSON.stringify({ action: "logout" }),
-      });
-      const responseJson = await parseJsonResponse(
-        response,
-        "The auth endpoint returned invalid JSON.",
-      );
+      const { error: signOutError } = await supabase.auth.signOut();
 
-      if (!response.ok) {
-        throw new Error(getErrorMessage(responseJson, "Unable to sign out."));
+      if (signOutError) {
+        throw signOutError;
       }
 
       cleanupRecording();
@@ -685,6 +766,9 @@ function App() {
       setNoteResult(null);
       setBaseNoteResult(null);
       setCurrentNoteTranscript("");
+      setCurrentEncounterId("");
+      setPatientDraft(getPatientDraftFromNote(null));
+      setPatientRecordStatus("");
       setPendingRecordings([]);
       setCurrentNoteRecordings([]);
       setSavedNotes([]);
@@ -707,25 +791,9 @@ function App() {
     setVaultError("");
 
     try {
-      const response = await fetch("/api/notes", {
-        credentials: "same-origin",
-      });
-      const responseJson = (await parseJsonResponse(
-        response,
-        "The notes endpoint returned invalid JSON.",
-      )) as NotesResponse;
-
-      if (!response.ok || !Array.isArray(responseJson.notes)) {
-        throw new Error(getErrorMessage(responseJson, "Unable to load note vault."));
-      }
-
-      const openNoteSummary = getSavedNoteSummary(
-        baseNoteResult ?? noteResult,
-        currentNoteTitle,
+      const notes = sortSavedNotes(
+        (await listEncounterSummaries()).map(toSavedNoteSummary),
       );
-      const notes = openNoteSummary
-        ? upsertSavedNoteSummary(responseJson.notes, openNoteSummary)
-        : sortSavedNotes(responseJson.notes);
 
       setSavedNotes(notes);
       return notes;
@@ -757,26 +825,25 @@ function App() {
     setVaultError("");
 
     try {
-      const response = await fetch(`/api/notes?id=${encodeURIComponent(noteId)}`, {
-        credentials: "same-origin",
-      });
-      const responseJson = (await parseJsonResponse(
-        response,
-        "The notes endpoint returned invalid JSON.",
-      )) as NotesResponse;
+      const note = await getEncounterDetail(noteId);
+      const noteResultDraft = note.result as NoteResult;
 
-      if (!response.ok || !responseJson.note) {
-        throw new Error(getErrorMessage(responseJson, "Unable to open saved note."));
-      }
-
-      const note = responseJson.note;
-
-      setBaseNoteResult(note.result);
-      setNoteResult(note.result);
+      setBaseNoteResult(noteResultDraft);
+      setNoteResult(noteResultDraft);
       setCurrentNoteTitle(note.title);
       setCurrentNoteTranscript(note.transcript);
+      setCurrentEncounterId(note.id);
+      setPatientDraft({
+        ...getPatientDraftFromNote(noteResultDraft),
+        name: note.patientName,
+        age: note.patientAge === undefined ? "" : String(note.patientAge),
+        gender: note.patientGender ?? "",
+        visitDate: getDateInputValue(note.visitDate),
+        diagnosis: note.diagnosis ?? "",
+      });
+      setPatientRecordStatus("Patient record loaded.");
       setPendingRecordings([]);
-      setCurrentNoteRecordings(note.recordings ?? []);
+      setCurrentNoteRecordings(getNoteRecordings(noteResultDraft));
       setActiveNoteLanguage("Original");
       setSelectedTranslationLanguage("");
       setTranslationStatus("");
@@ -796,30 +863,15 @@ function App() {
     setVaultError("");
 
     try {
-      const response = await fetch("/api/notes", {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        credentials: "same-origin",
-        body: JSON.stringify({ id: noteId, ...updates }),
-      });
-      const responseJson = (await parseJsonResponse(
-        response,
-        "The notes endpoint returned invalid JSON.",
-      )) as { note?: SavedNoteSummary; error?: string };
-
-      if (!response.ok || !responseJson.note) {
-        throw new Error(getErrorMessage(responseJson, "Unable to update saved note."));
-      }
-
-      const updatedNote = responseJson.note;
+      const updatedNote = toSavedNoteSummary(
+        await updateEncounterSummary(noteId, updates),
+      );
 
       setSavedNotes((currentNotes) =>
         upsertSavedNoteSummary(currentNotes, updatedNote),
       );
 
-      if (getNoteId(baseNoteResult ?? noteResult) === noteId) {
+      if (currentEncounterId === noteId) {
         if (updates.title) {
           setCurrentNoteTitle(updates.title);
         }
@@ -876,29 +928,21 @@ function App() {
     setVaultError("");
 
     try {
-      const response = await fetch(`/api/notes?id=${encodeURIComponent(note.id)}`, {
-        method: "DELETE",
-        credentials: "same-origin",
-      });
-      const responseJson = await parseJsonResponse(
-        response,
-        "The notes endpoint returned invalid JSON.",
-      );
-
-      if (!response.ok) {
-        throw new Error(getErrorMessage(responseJson, "Unable to delete saved note."));
-      }
+      await deleteEncounterRecord(note.id);
 
       setSavedNotes((currentNotes) =>
         currentNotes.filter((savedNote) => savedNote.id !== note.id),
       );
 
-      if (getNoteId(baseNoteResult ?? noteResult) === note.id) {
+      if (currentEncounterId === note.id) {
         setNoteResult(null);
         setBaseNoteResult(null);
         setCurrentNoteRecordings([]);
         setCurrentNoteTranscript("");
         setCurrentNoteTitle("");
+        setCurrentEncounterId("");
+        setPatientDraft(getPatientDraftFromNote(null));
+        setPatientRecordStatus("");
         navigateToView("dashboard");
       }
     } catch (deleteError) {
@@ -962,12 +1006,11 @@ function App() {
     setTranslationStatus("");
 
     try {
-      const response = await fetch("/api/translate-note", {
+      const response = await apiFetch("/api/translate-note", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        credentials: "same-origin",
         body: JSON.stringify({ noteId, language, force }),
       });
       const responseJson = (await parseJsonResponse(
@@ -980,16 +1023,15 @@ function App() {
       }
 
       const nextTranslationLanguages = getTranslationLanguages(responseJson.result);
+      const nextBaseNoteResult = baseNoteResult
+        ? {
+            ...baseNoteResult,
+            translation_languages: nextTranslationLanguages,
+          }
+        : responseJson.result;
 
       setNoteResult(responseJson.result);
-      setBaseNoteResult((current) =>
-        current
-          ? {
-              ...current,
-              translation_languages: nextTranslationLanguages,
-            }
-          : current,
-      );
+      setBaseNoteResult(nextBaseNoteResult);
       setCurrentNoteTitle(responseJson.title ?? currentNoteTitle);
       setActiveNoteLanguage(responseJson.language);
       setSelectedTranslationLanguage(responseJson.language);
@@ -1000,6 +1042,21 @@ function App() {
       );
       setIsLanguagePickerOpen(false);
       setLanguageSearch("");
+
+      if (currentEncounterId) {
+        const savedEncounter = await saveEncounterRecord({
+          encounterId: currentEncounterId,
+          patientDraft,
+          noteJson: toNoteRecord(nextBaseNoteResult),
+          transcript: currentNoteTranscript,
+          title: responseJson.title ?? currentNoteTitle,
+        });
+
+        setSavedNotes((currentNotes) =>
+          upsertSavedNoteSummary(currentNotes, toSavedNoteSummary(savedEncounter)),
+        );
+      }
+
       void loadSavedNotes();
     } catch (translationError) {
       setNoteError(
@@ -1024,9 +1081,8 @@ function App() {
 
       formData.set("audio", file);
 
-      const response = await fetch("/api/transcribe", {
+      const response = await apiFetch("/api/transcribe", {
         method: "POST",
-        credentials: "same-origin",
         body: formData,
       });
 
@@ -1077,6 +1133,9 @@ function App() {
       setCurrentNoteRecordings([]);
       setCurrentNoteTranscript("");
       setCurrentNoteTitle("");
+      setCurrentEncounterId("");
+      setPatientDraft(getPatientDraftFromNote(null));
+      setPatientRecordStatus("");
       setActiveNoteLanguage("Original");
       setSelectedTranslationLanguage("");
       setTranslationStatus("");
@@ -1185,6 +1244,9 @@ function App() {
     setIsRecording(false);
     setTranscript("");
     setPendingRecordings([]);
+    setCurrentEncounterId("");
+    setPatientDraft(getPatientDraftFromNote(null));
+    setPatientRecordStatus("");
     setIsLanguagePickerOpen(false);
     setLanguageSearch("");
     setNoteError("");
@@ -1206,12 +1268,11 @@ function App() {
     setNoteResult(null);
 
     try {
-      const response = await fetch("/api/make-note", {
+      const response = await apiFetch("/api/make-note", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        credentials: "same-origin",
         body: JSON.stringify({
           transcript: transcriptForNote,
           recordings: pendingRecordings.map((recording) => ({
@@ -1237,9 +1298,8 @@ function App() {
       }
 
       const generatedNote = responseJson as NoteResult;
-      const savedNoteSummary = getSavedNoteSummary(generatedNote);
 
-      if (!savedNoteSummary) {
+      if (!getNoteId(generatedNote)) {
         throw new Error(
           "The note was generated, but the server did not return a saved note ID.",
         );
@@ -1248,27 +1308,19 @@ function App() {
       setNoteResult(generatedNote);
       setBaseNoteResult(generatedNote);
       setCurrentNoteTranscript(transcriptForNote);
+      setCurrentEncounterId("");
+      setPatientDraft(getPatientDraftFromNote(generatedNote));
+      setPatientRecordStatus("Review detected patient info, then save it to the dashboard.");
       setTranscript("");
       setPendingRecordings([]);
       setCurrentNoteRecordings(getNoteRecordings(generatedNote));
       setCurrentNoteTitle(getStringValue(generatedNote.title));
       setActiveNoteLanguage("Original");
       setSelectedTranslationLanguage("");
-      setTranslationStatus("Saved to your note vault.");
+      setTranslationStatus("Generated note ready for review.");
       setStatus("Ready");
       setAutosaveStatus("Transcript cleared after saving");
       navigateToView("note");
-      setSavedNotes((currentNotes) =>
-        upsertSavedNoteSummary(currentNotes, savedNoteSummary),
-      );
-
-      const loadedNotes = await loadSavedNotes();
-
-      if (!loadedNotes.some((savedNote) => savedNote.id === savedNoteSummary.id)) {
-        setSavedNotes((currentNotes) =>
-          upsertSavedNoteSummary(currentNotes, savedNoteSummary),
-        );
-      }
     } catch (noteGenerationError) {
       setNoteError(
         noteGenerationError instanceof Error
@@ -1280,36 +1332,82 @@ function App() {
     }
   };
 
+  const saveCurrentPatientRecord = async () => {
+    const source = baseNoteResult ?? noteResult;
+
+    if (!source) {
+      setNoteError("Generate or open a note before saving a patient record.");
+      return;
+    }
+
+    setIsSavingPatientRecord(true);
+    setNoteError("");
+    setPatientRecordStatus("");
+
+    try {
+      const savedEncounter = await saveEncounterRecord({
+        encounterId: currentEncounterId || undefined,
+        patientDraft,
+        noteJson: toNoteRecord(source),
+        transcript: currentNoteTranscript,
+        title: currentNoteTitle,
+      });
+      const savedSummary = toSavedNoteSummary(savedEncounter);
+      const savedNoteResult = savedEncounter.result as NoteResult;
+
+      setCurrentEncounterId(savedEncounter.id);
+      setCurrentNoteTitle(savedEncounter.title);
+      setCurrentNoteTranscript(savedEncounter.transcript);
+      setBaseNoteResult(savedNoteResult);
+      setNoteResult((current) =>
+        activeNoteLanguage === "Original" ? savedNoteResult : current,
+      );
+      setPatientDraft({
+        ...patientDraft,
+        name: savedEncounter.patientName,
+        age:
+          savedEncounter.patientAge === undefined
+            ? ""
+            : String(savedEncounter.patientAge),
+        gender: savedEncounter.patientGender ?? "",
+        visitDate: getDateInputValue(savedEncounter.visitDate),
+        diagnosis: savedEncounter.diagnosis ?? "",
+      });
+      setSavedNotes((currentNotes) =>
+        upsertSavedNoteSummary(currentNotes, savedSummary),
+      );
+      setPatientRecordStatus(
+        currentEncounterId
+          ? "Patient record updated."
+          : "Patient record saved to dashboard.",
+      );
+    } catch (saveError) {
+      setNoteError(
+        saveError instanceof Error
+          ? saveError.message
+          : "Unable to save patient record.",
+      );
+    } finally {
+      setIsSavingPatientRecord(false);
+    }
+  };
+
   useEffect(() => {
     let isMounted = true;
 
     const checkAuth = async () => {
       try {
-        const response = await fetch("/api/auth", {
-          credentials: "same-origin",
-        });
+        const {
+          data: { session },
+          error: sessionError,
+        } = await supabase.auth.getSession();
 
-        if (response.status === 401) {
-          if (isMounted) {
-            setCurrentUser(null);
-          }
-
-          return;
-        }
-
-        const responseJson = (await parseJsonResponse(
-          response,
-          "The auth endpoint returned invalid JSON.",
-        )) as AuthResponse;
-
-        if (!response.ok || !responseJson.user) {
-          throw new Error(
-            getErrorMessage(responseJson, "Unable to check your session."),
-          );
+        if (sessionError) {
+          throw sessionError;
         }
 
         if (isMounted) {
-          setCurrentUser(responseJson.user);
+          setCurrentUser(session?.user ? toCurrentUser(session.user) : null);
         }
       } catch (authCheckError) {
         if (isMounted) {
@@ -1327,9 +1425,17 @@ function App() {
     };
 
     void checkAuth();
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (isMounted) {
+        setCurrentUser(session?.user ? toCurrentUser(session.user) : null);
+      }
+    });
 
     return () => {
       isMounted = false;
+      subscription.unsubscribe();
     };
   }, []);
 
@@ -1404,6 +1510,22 @@ function App() {
       setCurrentNoteTitle(
         typeof draft.currentNoteTitle === "string" ? draft.currentNoteTitle : "",
       );
+      setCurrentEncounterId(
+        typeof draft.currentEncounterId === "string" ? draft.currentEncounterId : "",
+      );
+      setPatientDraft(
+        draft.patientDraft && typeof draft.patientDraft === "object"
+          ? {
+              ...getPatientDraftFromNote(restoredBaseNote ?? restoredNote),
+              ...(draft.patientDraft as PatientDraft),
+            }
+          : getPatientDraftFromNote(restoredBaseNote ?? restoredNote),
+      );
+      setPatientRecordStatus(
+        typeof draft.patientRecordStatus === "string"
+          ? draft.patientRecordStatus
+          : "",
+      );
       setActiveNoteLanguage(
         typeof draft.activeNoteLanguage === "string"
           ? draft.activeNoteLanguage
@@ -1458,12 +1580,15 @@ function App() {
             transcript,
             noteResult,
             baseNoteResult,
-            currentNoteTranscript,
-            pendingRecordings,
-            currentNoteRecordings,
-            currentNoteTitle,
-            activeNoteLanguage,
-            selectedTranslationLanguage,
+          currentNoteTranscript,
+          pendingRecordings,
+          currentNoteRecordings,
+          currentNoteTitle,
+          currentEncounterId,
+          patientDraft,
+          patientRecordStatus,
+          activeNoteLanguage,
+          selectedTranslationLanguage,
             updatedAt: new Date().toISOString(),
           }),
         );
@@ -1483,9 +1608,12 @@ function App() {
     currentNoteTranscript,
     currentNoteRecordings,
     currentNoteTitle,
+    currentEncounterId,
     currentUser,
     hasHydratedAutosave,
     noteResult,
+    patientDraft,
+    patientRecordStatus,
     pendingRecordings,
     selectedTranslationLanguage,
     transcript,
@@ -1721,15 +1849,50 @@ function App() {
         ? `Saved original ${originalNoteLanguage} note`
         : "Saved original note"
       : `${activeNoteLanguage} translation`;
+  const dashboardSearchTerm = dashboardSearch.trim().toLowerCase();
+  const visibleSavedNotes = savedNotes
+    .filter((savedNote) => {
+      if (!dashboardSearchTerm) {
+        return true;
+      }
+
+      return [
+        savedNote.patientName,
+        savedNote.title,
+        savedNote.diagnosis,
+        savedNote.language_detected,
+      ]
+        .filter(Boolean)
+        .some((value) =>
+          String(value).toLowerCase().includes(dashboardSearchTerm),
+        );
+    })
+    .sort((left, right) => {
+      if (left.pinned !== right.pinned) {
+        return left.pinned ? -1 : 1;
+      }
+
+      if (dashboardSort === "patient") {
+        return (left.patientName || left.title).localeCompare(
+          right.patientName || right.title,
+        );
+      }
+
+      if (dashboardSort === "diagnosis") {
+        return (left.diagnosis || "").localeCompare(right.diagnosis || "");
+      }
+
+      return Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
+    });
   const pageTitle =
     activeView === "dashboard"
-      ? "Note vault"
+      ? "Patient dashboard"
       : activeView === "note"
         ? "Clinical note"
         : "ClinicScribe";
   const pageDescription =
     activeView === "dashboard"
-      ? "Your saved ClinicScribe notes stay tied to this account."
+      ? "Search and sort saved patient encounters."
       : activeView === "note"
         ? noteHeading || "Review the generated documentation."
         : "Clinical notes faster, clearer, and ready for review.";
@@ -1818,14 +1981,42 @@ function App() {
                 </div>
               ) : null}
 
+              <div className="mt-5 grid gap-3 lg:grid-cols-[1fr_auto] lg:items-end">
+                <label className="block text-sm font-medium text-zinc-700">
+                  Search records
+                  <input
+                    className="mt-2 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-zinc-950 outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100"
+                    onChange={(event) => setDashboardSearch(event.target.value)}
+                    placeholder="Patient, diagnosis, or note title"
+                    type="search"
+                    value={dashboardSearch}
+                  />
+                </label>
+
+                <label className="block text-sm font-medium text-zinc-700 lg:w-52">
+                  Sort by
+                  <select
+                    className="mt-2 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-zinc-950 outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100"
+                    onChange={(event) =>
+                      setDashboardSort(event.target.value as DashboardSort)
+                    }
+                    value={dashboardSort}
+                  >
+                    <option value="newest">Newest visit</option>
+                    <option value="patient">Patient name</option>
+                    <option value="diagnosis">Diagnosis</option>
+                  </select>
+                </label>
+              </div>
+
               <div className="mt-5 space-y-3">
-                {savedNotes.length === 0 && !isLoadingNotes ? (
+                {visibleSavedNotes.length === 0 && !isLoadingNotes ? (
                   <p className="rounded-xl bg-zinc-50 px-4 py-3 text-sm text-zinc-500">
-                    No saved notes yet.
+                    No patient records yet.
                   </p>
                 ) : null}
 
-                {savedNotes.map((savedNote) => (
+                {visibleSavedNotes.map((savedNote) => (
                   <div
                     className="rounded-xl border border-zinc-200 bg-white px-4 py-3 transition hover:border-zinc-400 hover:bg-zinc-50"
                     key={savedNote.id}
@@ -1838,10 +2029,21 @@ function App() {
                       >
                         <p className="font-semibold text-zinc-950">
                           {savedNote.pinned ? "Pinned - " : ""}
-                          {savedNote.title}
+                          {savedNote.patientName || savedNote.title}
                         </p>
                         <p className="mt-1 text-sm text-zinc-500">
-                          {formatDate(savedNote.createdAt)}
+                          {savedNote.patientAge !== undefined
+                            ? `Age ${savedNote.patientAge} - `
+                            : ""}
+                          {savedNote.patientGender
+                            ? `${savedNote.patientGender} - `
+                            : ""}
+                          {savedNote.diagnosis
+                            ? `${savedNote.diagnosis} - `
+                            : ""}
+                          {savedNote.visitDate
+                            ? formatDate(savedNote.visitDate)
+                            : formatDate(savedNote.createdAt)}
                           {savedNote.language_detected
                             ? ` - ${savedNote.language_detected} original`
                             : ""}
@@ -1853,6 +2055,9 @@ function App() {
                           {savedNote.translation_languages?.length
                             ? ` - ${savedNote.translation_languages.join(", ")}`
                             : ""}
+                        </p>
+                        <p className="mt-1 text-xs text-zinc-400">
+                          {savedNote.title}
                         </p>
                       </button>
 
@@ -1895,6 +2100,9 @@ function App() {
               setBaseNoteResult(null);
               setCurrentNoteTranscript("");
               setCurrentNoteTitle("");
+              setCurrentEncounterId("");
+              setPatientDraft(getPatientDraftFromNote(null));
+              setPatientRecordStatus("");
               setActiveNoteLanguage("Original");
               setSelectedTranslationLanguage("");
               setTranslationStatus("");
@@ -2117,6 +2325,121 @@ function App() {
                       Note ID: {currentNoteId || "Unsaved"}
                     </p>
                   </div>
+                ) : null}
+              </section>
+
+              <section className="rounded-2xl border border-zinc-200 p-5">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div>
+                    <h3 className="text-lg font-semibold text-zinc-950">
+                      Detected patient info
+                    </h3>
+                    <p className="mt-1 text-sm text-zinc-500">
+                      Review the AI fields before saving this encounter.
+                    </p>
+                  </div>
+
+                  <button
+                    className="rounded-lg bg-zinc-950 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
+                    disabled={isSavingPatientRecord}
+                    onClick={() => void saveCurrentPatientRecord()}
+                    type="button"
+                  >
+                    {isSavingPatientRecord
+                      ? "Saving..."
+                      : currentEncounterId
+                        ? "Update dashboard"
+                        : "Save to dashboard"}
+                  </button>
+                </div>
+
+                <div className="mt-4 grid gap-4 md:grid-cols-2">
+                  <label className="block text-sm font-medium text-zinc-700">
+                    Patient name
+                    <input
+                      className="mt-2 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-zinc-950 outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100"
+                      onChange={(event) =>
+                        setPatientDraft((current) => ({
+                          ...current,
+                          name: event.target.value,
+                        }))
+                      }
+                      placeholder="Unknown patient"
+                      type="text"
+                      value={patientDraft.name}
+                    />
+                  </label>
+
+                  <label className="block text-sm font-medium text-zinc-700">
+                    Age
+                    <input
+                      className="mt-2 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-zinc-950 outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100"
+                      max="130"
+                      min="0"
+                      onChange={(event) =>
+                        setPatientDraft((current) => ({
+                          ...current,
+                          age: event.target.value,
+                        }))
+                      }
+                      placeholder="Age"
+                      type="number"
+                      value={patientDraft.age}
+                    />
+                  </label>
+
+                  <label className="block text-sm font-medium text-zinc-700">
+                    Gender
+                    <input
+                      className="mt-2 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-zinc-950 outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100"
+                      onChange={(event) =>
+                        setPatientDraft((current) => ({
+                          ...current,
+                          gender: event.target.value,
+                        }))
+                      }
+                      placeholder="Not documented"
+                      type="text"
+                      value={patientDraft.gender}
+                    />
+                  </label>
+
+                  <label className="block text-sm font-medium text-zinc-700">
+                    Visit date
+                    <input
+                      className="mt-2 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-zinc-950 outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100"
+                      onChange={(event) =>
+                        setPatientDraft((current) => ({
+                          ...current,
+                          visitDate: event.target.value,
+                        }))
+                      }
+                      type="date"
+                      value={patientDraft.visitDate}
+                    />
+                  </label>
+
+                  <label className="block text-sm font-medium text-zinc-700 md:col-span-2">
+                    Diagnosis
+                    <input
+                      className="mt-2 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-zinc-950 outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100"
+                      onChange={(event) =>
+                        setPatientDraft((current) => ({
+                          ...current,
+                          diagnosis: event.target.value,
+                        }))
+                      }
+                      placeholder="Not documented"
+                      type="text"
+                      value={patientDraft.diagnosis}
+                    />
+                  </label>
+                </div>
+
+                {patientRecordStatus ? (
+                  <p className="mt-4 rounded-lg bg-zinc-50 px-3 py-2 text-sm text-zinc-600">
+                    {patientRecordStatus}
+                  </p>
                 ) : null}
               </section>
 

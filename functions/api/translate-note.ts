@@ -282,12 +282,36 @@ const toStringArray = (value: unknown) =>
     ? value.filter((item): item is string => typeof item === "string")
     : [];
 
+const toAgeValue = (value: unknown) => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsedAge = Number.parseInt(value, 10);
+
+    if (Number.isFinite(parsedAge)) {
+      return parsedAge;
+    }
+  }
+
+  return null;
+};
+
 const normalizeNoteJson = (value: unknown, providerUsed: ProviderUsed): NoteJson => {
   const source =
     value && typeof value === "object" ? (value as Record<string, unknown>) : {};
   const soap =
     source.soap && typeof source.soap === "object"
       ? (source.soap as Record<string, unknown>)
+      : {};
+  const patient =
+    source.patient && typeof source.patient === "object"
+      ? (source.patient as Record<string, unknown>)
+      : {};
+  const encounter =
+    source.encounter && typeof source.encounter === "object"
+      ? (source.encounter as Record<string, unknown>)
       : {};
   const extracted =
     source.extracted && typeof source.extracted === "object"
@@ -296,6 +320,17 @@ const normalizeNoteJson = (value: unknown, providerUsed: ProviderUsed): NoteJson
 
   return {
     language_detected: toStringValue(source.language_detected),
+    patient: {
+      name: toStringValue(patient.name),
+      age: toAgeValue(patient.age),
+      gender: toStringValue(patient.gender),
+      date_of_birth: toStringValue(patient.date_of_birth),
+    },
+    encounter: {
+      visit_date: toStringValue(encounter.visit_date),
+      chief_complaint: toStringValue(encounter.chief_complaint),
+      diagnosis: toStringValue(encounter.diagnosis),
+    },
     soap: {
       subjective: toStringValue(soap.subjective),
       objective: toStringValue(soap.objective),

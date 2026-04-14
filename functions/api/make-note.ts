@@ -52,6 +52,8 @@ Support Vietnamese, English, and mixed-language clinic conversations.
 Do not invent facts not present in the transcript.
 Separate uncertain information clearly in the uncertainties array.
 Preserve medication names exactly when possible.
+Extract patient demographics only when they are stated or strongly implied.
+Use empty strings for unknown text fields and null for unknown patient age.
 Produce patient-friendly discharge instructions in simpler language.
 Output valid JSON only.
 Do not include reasoning, chain-of-thought, markdown, or commentary.
@@ -60,6 +62,17 @@ Start the response with { and end it with }.
 The JSON schema must be exactly:
 {
   "language_detected": "string",
+  "patient": {
+    "name": "string",
+    "age": null,
+    "gender": "string",
+    "date_of_birth": "string"
+  },
+  "encounter": {
+    "visit_date": "string",
+    "chief_complaint": "string",
+    "diagnosis": "string"
+  },
   "soap": {
     "subjective": "string",
     "objective": "string",
@@ -424,6 +437,22 @@ const toStringArray = (value: unknown) =>
     ? value.filter((item): item is string => typeof item === "string")
     : [];
 
+const toAgeValue = (value: unknown) => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsedAge = Number.parseInt(value, 10);
+
+    if (Number.isFinite(parsedAge)) {
+      return parsedAge;
+    }
+  }
+
+  return null;
+};
+
 const getRecordingReferences = (value: unknown) =>
   Array.isArray(value)
     ? value
@@ -454,6 +483,14 @@ const normalizeNoteJson = (value: unknown, providerUsed: ProviderUsed): NoteJson
     source.soap && typeof source.soap === "object"
       ? (source.soap as Record<string, unknown>)
       : {};
+  const patient =
+    source.patient && typeof source.patient === "object"
+      ? (source.patient as Record<string, unknown>)
+      : {};
+  const encounter =
+    source.encounter && typeof source.encounter === "object"
+      ? (source.encounter as Record<string, unknown>)
+      : {};
   const extracted =
     source.extracted && typeof source.extracted === "object"
       ? (source.extracted as Record<string, unknown>)
@@ -461,6 +498,17 @@ const normalizeNoteJson = (value: unknown, providerUsed: ProviderUsed): NoteJson
 
   return {
     language_detected: toStringValue(source.language_detected),
+    patient: {
+      name: toStringValue(patient.name),
+      age: toAgeValue(patient.age),
+      gender: toStringValue(patient.gender),
+      date_of_birth: toStringValue(patient.date_of_birth),
+    },
+    encounter: {
+      visit_date: toStringValue(encounter.visit_date),
+      chief_complaint: toStringValue(encounter.chief_complaint),
+      diagnosis: toStringValue(encounter.diagnosis),
+    },
     soap: {
       subjective: toStringValue(soap.subjective),
       objective: toStringValue(soap.objective),

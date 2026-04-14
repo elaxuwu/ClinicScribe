@@ -8,6 +8,17 @@ export type ProviderUsed = "featherless" | "ollama";
 
 export type NoteJson = {
   language_detected: string;
+  patient: {
+    name: string;
+    age: number | null;
+    gender: string;
+    date_of_birth: string;
+  };
+  encounter: {
+    visit_date: string;
+    chief_complaint: string;
+    diagnosis: string;
+  };
   soap: {
     subjective: string;
     objective: string;
@@ -145,6 +156,46 @@ const normalizeNoteRecordings = (value: unknown) =>
 export const normalizeLanguageKey = (language: string) =>
   language.trim().toLowerCase();
 
+const getStringValue = (value: unknown) =>
+  typeof value === "string" ? value : "";
+
+const getAgeValue = (value: unknown) => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsedAge = Number.parseInt(value, 10);
+
+    if (Number.isFinite(parsedAge)) {
+      return parsedAge;
+    }
+  }
+
+  return null;
+};
+
+const normalizePatientMetadata = (value: unknown): NoteJson["patient"] => {
+  const patient = asRecord(value) ?? {};
+
+  return {
+    name: getStringValue(patient.name),
+    age: getAgeValue(patient.age),
+    gender: getStringValue(patient.gender),
+    date_of_birth: getStringValue(patient.date_of_birth),
+  };
+};
+
+const normalizeEncounterMetadata = (value: unknown): NoteJson["encounter"] => {
+  const encounter = asRecord(value) ?? {};
+
+  return {
+    visit_date: getStringValue(encounter.visit_date),
+    chief_complaint: getStringValue(encounter.chief_complaint),
+    diagnosis: getStringValue(encounter.diagnosis),
+  };
+};
+
 export const parseClinicNote = (value: unknown) => {
   if (typeof value !== "string") {
     return null;
@@ -182,8 +233,15 @@ export const parseClinicNote = (value: unknown) => {
       isStringArray(extracted.red_flags) &&
       isStringArray(noteJson.uncertainties)
     ) {
+      const normalizedNoteJson = {
+        ...(noteJson as NoteJson),
+        patient: normalizePatientMetadata(noteJson.patient),
+        encounter: normalizeEncounterMetadata(noteJson.encounter),
+      };
+
       return {
-        ...(note as Omit<ClinicNote, "translations">),
+        ...(note as Omit<ClinicNote, "note" | "translations">),
+        note: normalizedNoteJson,
         recordings: normalizeNoteRecordings(note.recordings),
         pinned: note.pinned === true,
         pinnedAt: typeof note.pinnedAt === "string" ? note.pinnedAt : undefined,
