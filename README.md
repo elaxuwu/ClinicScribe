@@ -17,3 +17,7 @@ Upstash Redis is still used by the Cloudflare Pages Functions layer for temporar
 
 - `UPSTASH_DATABASE_URL`: Upstash Redis HTTPS REST URL
 - `UPSTASH_DATABASE_KEY`: Upstash Redis REST token
+
+## Guest mode
+
+Guest mode lets someone use the app without creating an account. Patient dashboard records are stored in that browser's `localStorage` only. If a guest chooses **Create account** or **Sign in** from guest mode, the app does a one-time sync of those local records into the Supabase account and then deletes that guest record set from `localStorage`.

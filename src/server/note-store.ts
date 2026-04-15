@@ -73,6 +73,7 @@ const NOTE_PREFIX = "clinicscribe";
 const MAX_NOTE_LIST_COUNT = 100;
 const MAX_NOTE_RECORDING_COUNT = 10;
 const PENDING_RECORDING_TTL_SECONDS = 60 * 60 * 24;
+const GUEST_NOTE_TTL_SECONDS = 60 * 60 * 24 * 7;
 
 const getUserNotesKey = (userId: string) => `${NOTE_PREFIX}:notes:${userId}`;
 const getNoteKey = (noteId: string) => `${NOTE_PREFIX}:note:${noteId}`;
@@ -300,18 +301,28 @@ export const saveClinicNote = async (
     updatedAt: now,
   };
 
-  await redisCommand(env, [
-    "SET",
-    getNoteKey(clinicNote.id),
-    JSON.stringify(clinicNote),
-  ]);
-  await redisCommand(env, ["LPUSH", getUserNotesKey(user.id), clinicNote.id]);
-  await redisCommand(env, [
-    "LTRIM",
-    getUserNotesKey(user.id),
-    0,
-    MAX_NOTE_LIST_COUNT - 1,
-  ]);
+  await redisCommand(
+    env,
+    user.isGuest
+      ? [
+          "SET",
+          getNoteKey(clinicNote.id),
+          JSON.stringify(clinicNote),
+          "EX",
+          GUEST_NOTE_TTL_SECONDS,
+        ]
+      : ["SET", getNoteKey(clinicNote.id), JSON.stringify(clinicNote)],
+  );
+
+  if (!user.isGuest) {
+    await redisCommand(env, ["LPUSH", getUserNotesKey(user.id), clinicNote.id]);
+    await redisCommand(env, [
+      "LTRIM",
+      getUserNotesKey(user.id),
+      0,
+      MAX_NOTE_LIST_COUNT - 1,
+    ]);
+  }
 
   return clinicNote;
 };
@@ -401,7 +412,18 @@ export const saveClinicNoteRecord = async (env: AuthEnv, note: ClinicNote) => {
     updatedAt: new Date().toISOString(),
   };
 
-  await redisCommand(env, ["SET", getNoteKey(note.id), JSON.stringify(nextNote)]);
+  await redisCommand(
+    env,
+    note.userId.startsWith("guest_")
+      ? [
+          "SET",
+          getNoteKey(note.id),
+          JSON.stringify(nextNote),
+          "EX",
+          GUEST_NOTE_TTL_SECONDS,
+        ]
+      : ["SET", getNoteKey(note.id), JSON.stringify(nextNote)],
+  );
 
   return nextNote;
 };

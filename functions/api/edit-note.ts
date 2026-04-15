@@ -1,12 +1,5 @@
 import { requireAuthenticatedUser, type AuthEnv } from "./auth";
-import {
-  getClinicNote,
-  normalizeLanguageKey,
-  saveClinicNoteRecord,
-  type NoteJson,
-  type NoteTranslation,
-  type ProviderUsed,
-} from "../../src/server/note-store";
+import { type NoteJson, type ProviderUsed } from "../../src/server/note-store";
 
 interface Env extends AuthEnv {
   FEATHERLESS_API_KEY?: string;
@@ -17,7 +10,7 @@ interface Env extends AuthEnv {
 }
 
 type ChatMessage = {
-  role: "system" | "user";
+  role: "system" | "user" | "assistant";
   content: string;
 };
 
@@ -40,15 +33,57 @@ type ProviderFailure = {
 
 const CHAT_COMPLETIONS_PATH = "/chat/completions";
 const OLLAMA_CHAT_URL = "https://ollama.com/api/chat";
-const NOTE_MAX_TOKENS = 4000;
+const NOTE_MAX_TOKENS = 4500;
+const MAX_MESSAGE_CHARS = 5000;
+const MAX_SELECTED_TEXT_CHARS = 8000;
+const MAX_CHAT_HISTORY_MESSAGES = 12;
 
-const TRANSLATION_SYSTEM_PROMPT = `You translate clinical documentation for clinicians and patients.
-Translate every user-facing value into the requested language.
-Preserve the exact JSON schema, array structure, medical meaning, medication names, dosages, numbers, and clinical uncertainty.
-Do not add facts not present in the original note.
+const EDIT_SYSTEM_PROMPT = `You are ClinicScribe AI, a clinical note editing assistant.
+Edit the supplied clinical note JSON according to the clinician's request.
+The clinician may ask you to edit any part of the note, including patient metadata, SOAP, extracted data, discharge instructions, visit summary, and title.
+Treat direct user edits as clinician-provided information, but do not invent medical facts beyond the current note or the user's request.
+If selected_text is provided, focus the edit on that exact excerpt while keeping the whole note consistent.
+Return the full updated note object, not a diff or patch.
+Preserve arrays as arrays and preserve the same JSON schema.
+Use empty strings for unknown text fields and null for unknown patient age.
 Return valid JSON only.
-Do not include reasoning, markdown, or commentary.
-Start the response with { and end it with }.`;
+Do not include markdown, reasoning, or commentary outside the JSON.
+Start the response with { and end it with }.
+
+Return exactly this top-level shape:
+{
+  "assistant_message": "briefly explain what changed",
+  "note": {
+    "title": "string",
+    "language_detected": "string",
+    "patient": {
+      "name": "string",
+      "age": null,
+      "gender": "string",
+      "date_of_birth": "string"
+    },
+    "encounter": {
+      "visit_date": "string",
+      "chief_complaint": "string",
+      "diagnosis": "string"
+    },
+    "soap": {
+      "subjective": "string",
+      "objective": "string",
+      "assessment": "string",
+      "plan": "string"
+    },
+    "visit_summary": "string",
+    "extracted": {
+      "symptoms": ["string"],
+      "medications": ["string"],
+      "follow_up_plan": ["string"],
+      "red_flags": ["string"]
+    },
+    "discharge_instructions": "string",
+    "uncertainties": ["string"]
+  }
+}`;
 
 class ProviderRequestError extends Error {
   kind: ProviderErrorKind;
@@ -106,7 +141,7 @@ const getErrorMessage = (error: unknown) =>
   error instanceof Error ? error.message : "Unknown error";
 
 const logError = (message: string, data?: Record<string, unknown>) => {
-  console.error(`[translate-note] ${message}`, data ?? {});
+  console.error(`[edit-note] ${message}`, data ?? {});
 };
 
 const asRecord = (value: unknown) =>
@@ -298,25 +333,15 @@ const toAgeValue = (value: unknown) => {
   return null;
 };
 
+const truncateText = (value: string, maxLength: number) =>
+  value.length > maxLength ? value.slice(0, maxLength) : value;
+
 const normalizeNoteJson = (value: unknown, providerUsed: ProviderUsed): NoteJson => {
-  const source =
-    value && typeof value === "object" ? (value as Record<string, unknown>) : {};
-  const soap =
-    source.soap && typeof source.soap === "object"
-      ? (source.soap as Record<string, unknown>)
-      : {};
-  const patient =
-    source.patient && typeof source.patient === "object"
-      ? (source.patient as Record<string, unknown>)
-      : {};
-  const encounter =
-    source.encounter && typeof source.encounter === "object"
-      ? (source.encounter as Record<string, unknown>)
-      : {};
-  const extracted =
-    source.extracted && typeof source.extracted === "object"
-      ? (source.extracted as Record<string, unknown>)
-      : {};
+  const source = asRecord(value) ?? {};
+  const soap = asRecord(source.soap) ?? {};
+  const patient = asRecord(source.patient) ?? {};
+  const encounter = asRecord(source.encounter) ?? {};
+  const extracted = asRecord(source.extracted) ?? {};
 
   return {
     language_detected: toStringValue(source.language_detected),
@@ -350,18 +375,45 @@ const normalizeNoteJson = (value: unknown, providerUsed: ProviderUsed): NoteJson
   };
 };
 
-const createTranslationMessages = (
-  note: NoteJson,
-  language: string,
+const normalizeHistoryMessages = (value: unknown): ChatMessage[] =>
+  Array.isArray(value)
+    ? value
+        .map((item) => {
+          const record = asRecord(item);
+          const role = record?.role === "assistant" ? "assistant" : "user";
+          const content =
+            typeof record?.content === "string"
+              ? truncateText(record.content.trim(), MAX_MESSAGE_CHARS)
+              : "";
+
+          return content ? { role, content } : null;
+        })
+        .filter((item): item is ChatMessage => item !== null)
+        .slice(-MAX_CHAT_HISTORY_MESSAGES)
+    : [];
+
+const createEditMessages = (
+  note: Record<string, unknown>,
+  message: string,
+  selectedText: string,
+  chatHistory: ChatMessage[],
 ): ChatMessage[] => [
-  { role: "system", content: TRANSLATION_SYSTEM_PROMPT },
+  { role: "system", content: EDIT_SYSTEM_PROMPT },
+  ...chatHistory,
   {
     role: "user",
     content: [
-      `Translate this clinical note JSON into ${language}.`,
-      "Return only the translated JSON object with the exact same schema.",
+      "Edit this current clinical note JSON.",
+      "Return only the required JSON shape.",
       "",
+      "current_note_json:",
       JSON.stringify(note),
+      "",
+      selectedText ? "selected_text:" : "",
+      selectedText,
+      "",
+      "clinician_request:",
+      message,
     ].join("\n"),
   },
 ];
@@ -386,15 +438,47 @@ const createOllamaChatBody = (model: string, messages: ChatMessage[]) => ({
   messages,
 });
 
-const translateWithFeatherless = async (
+const extractEditResult = (
+  modelContent: string,
+  providerUsed: ProviderUsed,
+  sourceNote: Record<string, unknown>,
+) => {
+  const parsed = asRecord(parseModelJson(modelContent));
+  const modelNote = asRecord(parsed?.note);
+
+  if (!parsed || !modelNote) {
+    throw new Error("The model did not return an edited note object.");
+  }
+
+  const assistantMessage = toStringValue(parsed.assistant_message).trim();
+  const normalizedNote = normalizeNoteJson(modelNote, providerUsed);
+  const now = new Date().toISOString();
+
+  return {
+    message: assistantMessage || "Updated the note.",
+    result: {
+      ...normalizedNote,
+      note_id: sourceNote.note_id,
+      title: toStringValue(modelNote.title).trim() || sourceNote.title || "Clinic note",
+      saved_at: sourceNote.saved_at,
+      updated_at: now,
+      recordings: sourceNote.recordings,
+      pinned: sourceNote.pinned,
+      pinned_at: sourceNote.pinned_at,
+      translation_languages: toStringArray(sourceNote.translation_languages),
+      chat_history: sourceNote.chat_history,
+    },
+  };
+};
+
+const editWithFeatherless = async (
   env: Env,
-  note: NoteJson,
-  language: string,
+  messages: ChatMessage[],
+  sourceNote: Record<string, unknown>,
 ) => {
   const apiKey = getRequiredEnv(env, "FEATHERLESS_API_KEY");
   const baseUrl = normalizeBaseUrl(getRequiredEnv(env, "FEATHERLESS_BASE_URL"));
   const model = getRequiredEnv(env, "FEATHERLESS_MODEL");
-  const messages = createTranslationMessages(note, language);
   const upstreamJson = await fetchJson(
     "Featherless",
     `${baseUrl}${CHAT_COMPLETIONS_PATH}`,
@@ -411,7 +495,7 @@ const translateWithFeatherless = async (
 
   if (!modelContent) {
     throw new ProviderRequestError(
-      "Featherless response did not include translated note content.",
+      "Featherless response did not include edited note content.",
       {
         kind: "missing-content",
       },
@@ -419,10 +503,10 @@ const translateWithFeatherless = async (
   }
 
   try {
-    return normalizeNoteJson(parseModelJson(modelContent), "featherless");
+    return extractEditResult(modelContent, "featherless", sourceNote);
   } catch (error) {
     throw new ProviderRequestError(
-      "Featherless translated note could not be parsed as valid JSON.",
+      "Featherless edited note could not be parsed as valid JSON.",
       {
         kind: "invalid-note-json",
         details: getErrorMessage(error),
@@ -432,14 +516,13 @@ const translateWithFeatherless = async (
   }
 };
 
-const translateWithOllama = async (
+const editWithOllama = async (
   env: Env,
-  note: NoteJson,
-  language: string,
+  messages: ChatMessage[],
+  sourceNote: Record<string, unknown>,
 ) => {
   const apiKey = getRequiredEnv(env, "OLLAMA_API_KEY");
   const model = getRequiredEnv(env, "OLLAMA_MODEL");
-  const messages = createTranslationMessages(note, language);
   const upstreamJson = await fetchJson(
     "Ollama Cloud",
     OLLAMA_CHAT_URL,
@@ -456,7 +539,7 @@ const translateWithOllama = async (
 
   if (!modelContent) {
     throw new ProviderRequestError(
-      "Ollama Cloud response did not include translated note content.",
+      "Ollama Cloud response did not include edited note content.",
       {
         kind: "missing-content",
       },
@@ -464,10 +547,10 @@ const translateWithOllama = async (
   }
 
   try {
-    return normalizeNoteJson(parseModelJson(modelContent), "ollama");
+    return extractEditResult(modelContent, "ollama", sourceNote);
   } catch (error) {
     throw new ProviderRequestError(
-      "Ollama Cloud translated note could not be parsed as valid JSON.",
+      "Ollama Cloud edited note could not be parsed as valid JSON.",
       {
         kind: "invalid-note-json",
         details: getErrorMessage(error),
@@ -498,30 +581,30 @@ const summarizeProviderFailure = (
   };
 };
 
-const translateWithFallback = async (
+const editWithFallback = async (
   env: Env,
-  note: NoteJson,
-  language: string,
+  messages: ChatMessage[],
+  sourceNote: Record<string, unknown>,
 ) => {
   try {
-    return await translateWithFeatherless(env, note, language);
+    return await editWithFeatherless(env, messages, sourceNote);
   } catch (featherlessError) {
     const featherlessFailure = summarizeProviderFailure(
       "featherless",
       featherlessError,
     );
 
-    logError("Featherless translation failure", featherlessFailure);
+    logError("Featherless note-edit failure", featherlessFailure);
 
     try {
-      return await translateWithOllama(env, note, language);
+      return await editWithOllama(env, messages, sourceNote);
     } catch (ollamaError) {
       const ollamaFailure = summarizeProviderFailure("ollama", ollamaError);
 
-      logError("Ollama Cloud translation failure", ollamaFailure);
+      logError("Ollama Cloud note-edit failure", ollamaFailure);
 
       throw new ProviderRequestError(
-        "Unable to translate note. Featherless primary and Ollama Cloud fallback both failed.",
+        "Unable to edit note. Featherless primary and Ollama Cloud fallback both failed.",
         {
           kind: "http",
           details: [featherlessFailure, ollamaFailure],
@@ -546,140 +629,35 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     return jsonResponse({ error: "Request body must be valid JSON." }, { status: 400 });
   }
 
-  const record =
-    body && typeof body === "object" ? (body as Record<string, unknown>) : {};
-  const noteId = typeof record.noteId === "string" ? record.noteId.trim() : "";
-  const language =
-    typeof record.language === "string" ? record.language.trim() : "";
-  const force = record.force === true;
-  const inlineGuestNote = authResult.isGuest ? asRecord(record.note) : null;
+  const record = asRecord(body) ?? {};
+  const sourceNote = asRecord(record.note);
+  const message =
+    typeof record.message === "string"
+      ? truncateText(record.message.trim(), MAX_MESSAGE_CHARS)
+      : "";
+  const selectedText =
+    typeof record.selectedText === "string"
+      ? truncateText(record.selectedText.trim(), MAX_SELECTED_TEXT_CHARS)
+      : "";
 
-  if (!noteId && !inlineGuestNote) {
-    return jsonResponse({ error: "noteId is required." }, { status: 400 });
+  if (!sourceNote) {
+    return jsonResponse({ error: "note is required." }, { status: 400 });
   }
 
-  if (!language || language.length > 60) {
-    return jsonResponse({ error: "language is required." }, { status: 400 });
+  if (!message) {
+    return jsonResponse({ error: "message is required." }, { status: 400 });
   }
 
-  if (inlineGuestNote) {
-    try {
-      const sourceProvider =
-        inlineGuestNote.provider_used === "ollama" ? "ollama" : "featherless";
-      const sourceNote = normalizeNoteJson(inlineGuestNote, sourceProvider);
-      const translatedNote = await translateWithFallback(env, sourceNote, language);
-      const now = new Date().toISOString();
-      const existingLanguages = toStringArray(inlineGuestNote.translation_languages);
-      const translationLanguages = [...existingLanguages, language].filter(
-        (savedLanguage, index, languages) =>
-          languages.findIndex(
-            (candidate) =>
-              normalizeLanguageKey(candidate) ===
-              normalizeLanguageKey(savedLanguage),
-          ) === index,
-      );
-      const title =
-        typeof record.title === "string" && record.title.trim()
-          ? record.title.trim()
-          : toStringValue(inlineGuestNote.title) || "Clinic note";
-      const resolvedNoteId =
-        noteId || toStringValue(inlineGuestNote.note_id) || `guest_note_${crypto.randomUUID()}`;
-
-      return jsonResponse({
-        note_id: resolvedNoteId,
-        title,
-        language,
-        cached: false,
-        result: {
-          ...translatedNote,
-          note_id: resolvedNoteId,
-          title,
-          saved_at: toStringValue(inlineGuestNote.saved_at) || now,
-          updated_at: now,
-          recordings: inlineGuestNote.recordings,
-          translation_languages: translationLanguages,
-        },
-      });
-    } catch (error) {
-      if (error instanceof ProviderRequestError) {
-        return jsonResponse(
-          {
-            error: error.message,
-            details: error.details,
-          },
-          { status: 502 },
-        );
-      }
-
-      return jsonResponse(
-        { error: "Unable to translate note.", details: getErrorMessage(error) },
-        { status: 500 },
-      );
-    }
-  }
-
-  const note = await getClinicNote(env, authResult.id, noteId);
-
-  if (!note) {
-    return jsonResponse({ error: "Saved note not found." }, { status: 404 });
-  }
-
-  const languageKey = normalizeLanguageKey(language);
-  const cachedTranslation = note.translations[languageKey];
-
-  if (cachedTranslation && !force) {
-    return jsonResponse({
-      note_id: note.id,
-      title: note.title,
-      language: cachedTranslation.language,
-      cached: true,
-      result: {
-        ...cachedTranslation.note,
-        note_id: note.id,
-        title: note.title,
-        saved_at: note.createdAt,
-        updated_at: note.updatedAt,
-        translation_languages: Object.values(note.translations).map(
-          (translation) => translation.language,
-        ),
-      },
-    });
-  }
+  const chatHistory = normalizeHistoryMessages(record.chatHistory);
+  const messages = createEditMessages(
+    sourceNote,
+    message,
+    selectedText,
+    chatHistory,
+  );
 
   try {
-    const translatedNote = await translateWithFallback(env, note.note, language);
-    const now = new Date().toISOString();
-    const translation: NoteTranslation = {
-      language,
-      note: translatedNote,
-      provider_used: translatedNote.provider_used,
-      createdAt: cachedTranslation?.createdAt ?? now,
-      updatedAt: now,
-    };
-    const savedNote = await saveClinicNoteRecord(env, {
-      ...note,
-      translations: {
-        ...note.translations,
-        [languageKey]: translation,
-      },
-    });
-
-    return jsonResponse({
-      note_id: savedNote.id,
-      title: savedNote.title,
-      language,
-      cached: false,
-      result: {
-        ...translation.note,
-        note_id: savedNote.id,
-        title: savedNote.title,
-        saved_at: savedNote.createdAt,
-        updated_at: savedNote.updatedAt,
-        translation_languages: Object.values(savedNote.translations).map(
-          (savedTranslation) => savedTranslation.language,
-        ),
-      },
-    });
+    return jsonResponse(await editWithFallback(env, messages, sourceNote));
   } catch (error) {
     if (error instanceof ProviderRequestError) {
       return jsonResponse(
@@ -692,7 +670,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     }
 
     return jsonResponse(
-      { error: "Unable to translate note.", details: getErrorMessage(error) },
+      { error: "Unable to edit note.", details: getErrorMessage(error) },
       { status: 500 },
     );
   }

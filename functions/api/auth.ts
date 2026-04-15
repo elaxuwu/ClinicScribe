@@ -13,6 +13,7 @@ export type PublicUser = {
   name: string;
   createdAt: string;
   accessToken?: string;
+  isGuest?: boolean;
 };
 
 type StoredUser = PublicUser & {
@@ -299,6 +300,26 @@ const getBearerToken = (request: Request) => {
   return match?.[1]?.trim() || "";
 };
 
+const getGuestUser = (request: Request): PublicUser | null => {
+  if (request.headers.get("X-ClinicScribe-Guest") !== "local") {
+    return null;
+  }
+
+  const guestId = request.headers.get("X-ClinicScribe-Guest-Id")?.trim() ?? "";
+
+  if (!/^[A-Za-z0-9_-]{12,96}$/.test(guestId)) {
+    return null;
+  }
+
+  return {
+    id: guestId,
+    email: "local-guest",
+    name: "Guest",
+    createdAt: new Date().toISOString(),
+    isGuest: true,
+  };
+};
+
 const getNameFromSupabaseMetadata = (
   metadata: unknown,
   email: string,
@@ -498,6 +519,12 @@ const destroySession = async (request: Request, env: AuthEnv) => {
 };
 
 const getAuthenticatedUser = async (request: Request, env: AuthEnv) => {
+  const guestUser = getGuestUser(request);
+
+  if (guestUser) {
+    return guestUser;
+  }
+
   const supabaseUser = await verifySupabaseUser(request, env);
 
   if (supabaseUser || getBearerToken(request)) {

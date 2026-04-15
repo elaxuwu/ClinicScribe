@@ -34,6 +34,7 @@ type NoteResult = {
   recordings?: unknown;
   pinned?: unknown;
   pinned_at?: unknown;
+  chat_history?: unknown;
   language_detected?: unknown;
   provider_used?: unknown;
   patient?: {
@@ -69,6 +70,7 @@ type CurrentUser = {
   email: string;
   name: string;
   createdAt: string;
+  isGuest?: boolean;
 };
 
 type AuthMode = "login" | "signup";
@@ -114,7 +116,38 @@ type TranslateResponse = {
   details?: unknown;
 };
 
+type NoteChatRole = "user" | "assistant";
+
+type NoteChatMessage = {
+  id: string;
+  role: NoteChatRole;
+  content: string;
+  selectedText?: string;
+  createdAt: string;
+};
+
+type EditNoteResponse = {
+  message?: string;
+  result?: NoteResult;
+  error?: string;
+  details?: unknown;
+};
+
 type DashboardSort = "newest" | "patient" | "diagnosis";
+type IconName =
+  | "trash"
+  | "pen"
+  | "pin"
+  | "pinOff"
+  | "refresh"
+  | "mic"
+  | "stop"
+  | "eraser"
+  | "home"
+  | "dashboard"
+  | "chat"
+  | "send"
+  | "x";
 
 const LANGUAGE_OPTIONS = [
   "Vietnamese",
@@ -135,7 +168,13 @@ const LANGUAGE_OPTIONS = [
 ];
 
 const AUTOSAVE_DELAY_MS = 600;
+const NOTE_RECORD_AUTOSAVE_DELAY_MS = 900;
+const NOTE_CHAT_HISTORY_LIMIT = 80;
 const BRAND_LOGO_SRC = "/brand/logo.png?v=2";
+const GUEST_SESSION_KEY = "clinicscribe.guest.active";
+const GUEST_ID_KEY = "clinicscribe.guest.id";
+const GUEST_RECORDS_PREFIX = "clinicscribe.guest.records";
+const GUEST_SYNC_SOURCE_KEY = "clinicscribe.guest.syncSourceId";
 
 const VIEW_PATHS: Record<AppView, string> = {
   scribe: "/",
@@ -158,6 +197,8 @@ const getViewFromPathname = (pathname: string): AppView => {
 };
 
 const getAutosaveKey = (userId: string) => `clinicscribe.autosave.${userId}`;
+const getGuestRecordsKey = (guestId: string) =>
+  `${GUEST_RECORDS_PREFIX}.${guestId}`;
 
 const clearAutosavedDraft = (user: CurrentUser | null) => {
   if (!user) {
@@ -225,6 +266,160 @@ const getNoteRecordings = (value: unknown) => {
         .filter((recording): recording is NoteRecording => recording !== null)
     : [];
 };
+
+const Icon = ({ name }: { name: IconName }) => {
+  const commonProps = {
+    className: "h-4 w-4",
+    fill: "none",
+    stroke: "currentColor",
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    strokeWidth: 2,
+    viewBox: "0 0 24 24",
+  };
+
+  switch (name) {
+    case "trash":
+      return (
+        <svg {...commonProps} aria-hidden="true">
+          <path d="M3 6h18" />
+          <path d="M8 6V4h8v2" />
+          <path d="M19 6l-1 14H6L5 6" />
+          <path d="M10 11v5" />
+          <path d="M14 11v5" />
+        </svg>
+      );
+    case "pen":
+      return (
+        <svg {...commonProps} aria-hidden="true">
+          <path d="M12 20h9" />
+          <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+        </svg>
+      );
+    case "pin":
+      return (
+        <svg {...commonProps} aria-hidden="true">
+          <path d="M12 17v5" />
+          <path d="M5 17h14" />
+          <path d="M8 17l1-8-3-3V4h12v2l-3 3 1 8" />
+        </svg>
+      );
+    case "pinOff":
+      return (
+        <svg {...commonProps} aria-hidden="true">
+          <path d="M12 17v5" />
+          <path d="M5 17h12" />
+          <path d="M8 17l1-8-3-3V4h4" />
+          <path d="M14 4h4v2l-2.1 2.1" />
+          <path d="M3 3l18 18" />
+        </svg>
+      );
+    case "refresh":
+      return (
+        <svg {...commonProps} aria-hidden="true">
+          <path d="M20 11a8 8 0 0 0-14.7-4" />
+          <path d="M5 3v5h5" />
+          <path d="M4 13a8 8 0 0 0 14.7 4" />
+          <path d="M19 21v-5h-5" />
+        </svg>
+      );
+    case "mic":
+      return (
+        <svg {...commonProps} aria-hidden="true">
+          <path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z" />
+          <path d="M19 11a7 7 0 0 1-14 0" />
+          <path d="M12 18v3" />
+          <path d="M8 21h8" />
+        </svg>
+      );
+    case "stop":
+      return (
+        <svg {...commonProps} aria-hidden="true">
+          <path d="M7 7h10v10H7z" />
+        </svg>
+      );
+    case "eraser":
+      return (
+        <svg {...commonProps} aria-hidden="true">
+          <path d="M20 20H9" />
+          <path d="M16.5 3.5 21 8l-9.5 9.5H7L3 13.5Z" />
+          <path d="m7 17-4-4" />
+        </svg>
+      );
+    case "home":
+      return (
+        <svg {...commonProps} aria-hidden="true">
+          <path d="m3 11 9-8 9 8" />
+          <path d="M5 10v10h14V10" />
+          <path d="M9 20v-6h6v6" />
+        </svg>
+      );
+    case "dashboard":
+      return (
+        <svg {...commonProps} aria-hidden="true">
+          <path d="M4 4h7v7H4z" />
+          <path d="M13 4h7v5h-7z" />
+          <path d="M13 11h7v9h-7z" />
+          <path d="M4 13h7v7H4z" />
+        </svg>
+      );
+    case "chat":
+      return (
+        <svg {...commonProps} aria-hidden="true">
+          <path d="M21 12a8 8 0 0 1-8 8H7l-4 3v-6.5A8 8 0 1 1 21 12Z" />
+          <path d="M8 11h8" />
+          <path d="M8 15h5" />
+        </svg>
+      );
+    case "send":
+      return (
+        <svg {...commonProps} aria-hidden="true">
+          <path d="m22 2-7 20-4-9-9-4Z" />
+          <path d="M22 2 11 13" />
+        </svg>
+      );
+    case "x":
+      return (
+        <svg {...commonProps} aria-hidden="true">
+          <path d="M18 6 6 18" />
+          <path d="m6 6 12 12" />
+        </svg>
+      );
+    default:
+      return null;
+  }
+};
+
+const iconButtonClass =
+  "inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-zinc-300 text-zinc-700 transition hover:border-zinc-400 hover:bg-white disabled:cursor-not-allowed disabled:border-zinc-200 disabled:text-zinc-400";
+
+const dangerIconButtonClass =
+  "inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-red-200 text-red-700 transition hover:border-red-300 hover:bg-red-50 disabled:cursor-not-allowed disabled:border-red-100 disabled:text-red-300";
+
+const IconButton = ({
+  label,
+  icon,
+  onClick,
+  disabled,
+  danger = false,
+}: {
+  label: string;
+  icon: IconName;
+  onClick: () => void;
+  disabled?: boolean;
+  danger?: boolean;
+}) => (
+  <button
+    aria-label={label}
+    className={danger ? dangerIconButtonClass : iconButtonClass}
+    disabled={disabled}
+    onClick={onClick}
+    title={label}
+    type="button"
+  >
+    <Icon name={icon} />
+  </button>
+);
 
 const upsertSavedNoteSummary = (
   notes: SavedNoteSummary[],
@@ -358,6 +553,54 @@ const getNoteId = (note: NoteResult | null) => getStringValue(note?.note_id);
 const toNoteRecord = (note: NoteResult | null): Record<string, unknown> =>
   note && typeof note === "object" ? (note as Record<string, unknown>) : {};
 
+const createNoteChatMessageId = () => `chat_${crypto.randomUUID()}`;
+
+const normalizeNoteChatMessage = (value: unknown): NoteChatMessage | null => {
+  const record = asRecord(value);
+  const role = record?.role === "assistant" ? "assistant" : "user";
+  const content = getStringValue(record?.content);
+
+  if (!content) {
+    return null;
+  }
+
+  return {
+    id:
+      typeof record?.id === "string" && record.id.trim()
+        ? record.id
+        : createNoteChatMessageId(),
+    role,
+    content,
+    selectedText:
+      typeof record?.selectedText === "string" && record.selectedText.trim()
+        ? record.selectedText.trim()
+        : undefined,
+    createdAt:
+      typeof record?.createdAt === "string" && record.createdAt.trim()
+        ? record.createdAt
+        : new Date().toISOString(),
+  };
+};
+
+const getNoteChatHistory = (note: NoteResult | null) =>
+  Array.isArray(note?.chat_history)
+    ? note.chat_history
+        .map(normalizeNoteChatMessage)
+        .filter((message): message is NoteChatMessage => message !== null)
+        .slice(-NOTE_CHAT_HISTORY_LIMIT)
+    : [];
+
+const withNoteChatHistory = (
+  note: NoteResult | null,
+  chatHistory: NoteChatMessage[],
+) =>
+  note
+    ? {
+        ...note,
+        chat_history: chatHistory.slice(-NOTE_CHAT_HISTORY_LIMIT),
+      }
+    : note;
+
 const toLocalDateInputValue = (date: Date) => {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -424,6 +667,49 @@ const toCurrentUser = (user: User): CurrentUser => {
   };
 };
 
+const getOrCreateGuestId = () => {
+  const existingGuestId = localStorage.getItem(GUEST_ID_KEY);
+
+  if (existingGuestId) {
+    return existingGuestId;
+  }
+
+  const guestId = `guest_${crypto.randomUUID()}`;
+  localStorage.setItem(GUEST_ID_KEY, guestId);
+
+  return guestId;
+};
+
+const makeGuestUser = (): CurrentUser => ({
+  id: getOrCreateGuestId(),
+  email: "Saved on this browser",
+  name: "Guest",
+  createdAt: new Date().toISOString(),
+  isGuest: true,
+});
+
+const setGuestModeActive = (isActive: boolean) => {
+  if (isActive) {
+    localStorage.setItem(GUEST_SESSION_KEY, "true");
+    return;
+  }
+
+  localStorage.removeItem(GUEST_SESSION_KEY);
+};
+
+const getActiveGuestUser = () =>
+  localStorage.getItem(GUEST_SESSION_KEY) === "true" ? makeGuestUser() : null;
+
+const setPendingGuestSync = (guestId: string) => {
+  sessionStorage.setItem(GUEST_SYNC_SOURCE_KEY, guestId);
+};
+
+const getPendingGuestSync = () => sessionStorage.getItem(GUEST_SYNC_SOURCE_KEY);
+
+const clearPendingGuestSync = () => {
+  sessionStorage.removeItem(GUEST_SYNC_SOURCE_KEY);
+};
+
 const getSupabaseAccessToken = async () => {
   const {
     data: { session },
@@ -437,11 +723,20 @@ const getSupabaseAccessToken = async () => {
   return session.access_token;
 };
 
-const apiFetch = async (input: RequestInfo | URL, init: RequestInit = {}) => {
+const apiFetch = async (
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  options: { guestId?: string } = {},
+) => {
   const headers = new Headers(init.headers);
-  const accessToken = await getSupabaseAccessToken();
 
-  headers.set("Authorization", `Bearer ${accessToken}`);
+  if (options.guestId) {
+    headers.set("X-ClinicScribe-Guest", "local");
+    headers.set("X-ClinicScribe-Guest-Id", options.guestId);
+  } else {
+    const accessToken = await getSupabaseAccessToken();
+    headers.set("Authorization", `Bearer ${accessToken}`);
+  }
 
   return fetch(input, {
     ...init,
@@ -468,6 +763,296 @@ const toSavedNoteSummary = (encounter: EncounterSummary): SavedNoteSummary => ({
   pinnedAt: encounter.pinnedAt,
   translation_languages: encounter.translationLanguages,
 });
+
+type GuestEncounterRecord = EncounterSummary & {
+  transcript: string;
+  result: Record<string, unknown>;
+};
+
+const toGuestEncounterRecord = (value: unknown): GuestEncounterRecord | null => {
+  const record = asRecord(value);
+  const result = asRecord(record?.result);
+
+  if (
+    !record ||
+    !result ||
+    typeof record.id !== "string" ||
+    typeof record.title !== "string" ||
+    typeof record.createdAt !== "string" ||
+    typeof record.updatedAt !== "string" ||
+    typeof record.patientName !== "string" ||
+    typeof record.recordingCount !== "number" ||
+    typeof record.transcript !== "string"
+  ) {
+    return null;
+  }
+
+  return {
+    id: record.id,
+    legacyNoteId:
+      typeof record.legacyNoteId === "string" ? record.legacyNoteId : undefined,
+    title: record.title,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    patientName: record.patientName,
+    patientAge: typeof record.patientAge === "number" ? record.patientAge : undefined,
+    patientGender:
+      typeof record.patientGender === "string" ? record.patientGender : undefined,
+    diagnosis: typeof record.diagnosis === "string" ? record.diagnosis : undefined,
+    visitDate: typeof record.visitDate === "string" ? record.visitDate : undefined,
+    languageDetected:
+      typeof record.languageDetected === "string"
+        ? record.languageDetected
+        : undefined,
+    providerUsed:
+      typeof record.providerUsed === "string" ? record.providerUsed : undefined,
+    recordingCount: record.recordingCount,
+    translationLanguages: asStringArray(record.translationLanguages),
+    pinned: record.pinned === true,
+    pinnedAt: typeof record.pinnedAt === "string" ? record.pinnedAt : undefined,
+    transcript: record.transcript,
+    result,
+  };
+};
+
+const readGuestEncounterRecords = (guestId: string): GuestEncounterRecord[] => {
+  try {
+    const rawRecords = localStorage.getItem(getGuestRecordsKey(guestId));
+
+    if (!rawRecords) {
+      return [];
+    }
+
+    const parsedRecords = JSON.parse(rawRecords) as unknown;
+
+    return Array.isArray(parsedRecords)
+      ? parsedRecords
+          .map(toGuestEncounterRecord)
+          .filter((record): record is GuestEncounterRecord => record !== null)
+      : [];
+  } catch {
+    return [];
+  }
+};
+
+const writeGuestEncounterRecords = (
+  guestId: string,
+  records: GuestEncounterRecord[],
+) => {
+  localStorage.setItem(getGuestRecordsKey(guestId), JSON.stringify(records));
+};
+
+const parsePatientAge = (age: string) => {
+  const parsedAge = Number.parseInt(age, 10);
+
+  return Number.isFinite(parsedAge) && parsedAge >= 0 && parsedAge <= 130
+    ? parsedAge
+    : undefined;
+};
+
+const normalizePatientName = (name: string) =>
+  name.replace(/\s+/g, " ").trim() || "Unknown patient";
+
+const getVisitDateTimestamp = (visitDate: string) => {
+  const trimmedDate = visitDate.trim();
+
+  if (!trimmedDate) {
+    return undefined;
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmedDate)) {
+    return `${trimmedDate}T00:00:00.000Z`;
+  }
+
+  const date = new Date(trimmedDate);
+
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+};
+
+const makeGuestTitle = (
+  noteJson: Record<string, unknown>,
+  transcript: string,
+  explicitTitle = "",
+) => {
+  const title = (
+    explicitTitle ||
+    getStringValue(noteJson.title) ||
+    getStringValue(noteJson.visit_summary) ||
+    transcript ||
+    "Clinic note"
+  )
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return title || "Clinic note";
+};
+
+const getGuestRecordingCount = (noteJson: Record<string, unknown>) =>
+  Array.isArray(noteJson.recordings) ? noteJson.recordings.length : 0;
+
+const saveGuestEncounterRecord = (
+  guestId: string,
+  input: {
+    encounterId?: string;
+    patientDraft: PatientDraft;
+    noteJson: Record<string, unknown>;
+    transcript: string;
+    title?: string;
+  },
+) => {
+  const records = readGuestEncounterRecords(guestId);
+  const existingRecord = input.encounterId
+    ? records.find((record) => record.id === input.encounterId)
+    : null;
+  const now = new Date().toISOString();
+  const noteJson = input.noteJson;
+  const patientMetadata = asRecord(noteJson.patient) ?? {};
+  const encounterMetadata = asRecord(noteJson.encounter) ?? {};
+  const soap = asRecord(noteJson.soap) ?? {};
+  const patientName = normalizePatientName(input.patientDraft.name);
+  const patientAge = parsePatientAge(input.patientDraft.age);
+  const patientGender = input.patientDraft.gender.trim() || undefined;
+  const diagnosis =
+    input.patientDraft.diagnosis.trim() ||
+    getStringValue(encounterMetadata.diagnosis) ||
+    getStringValue(soap.assessment) ||
+    undefined;
+  const visitDate = getVisitDateTimestamp(input.patientDraft.visitDate);
+  const title = makeGuestTitle(noteJson, input.transcript, input.title);
+  const noteId =
+    getStringValue(noteJson.note_id) ||
+    existingRecord?.legacyNoteId ||
+    `guest_note_${crypto.randomUUID()}`;
+  const result: Record<string, unknown> = {
+    ...noteJson,
+    note_id: noteId,
+    title,
+    pinned: existingRecord?.pinned === true,
+    pinned_at: existingRecord?.pinnedAt,
+    patient: {
+      ...patientMetadata,
+      name: patientName,
+      age: patientAge ?? null,
+      gender: patientGender ?? "",
+    },
+    encounter: {
+      ...encounterMetadata,
+      visit_date: input.patientDraft.visitDate.trim(),
+      diagnosis: diagnosis ?? "",
+    },
+  };
+  const record: GuestEncounterRecord = {
+    id: existingRecord?.id ?? `guest_encounter_${crypto.randomUUID()}`,
+    legacyNoteId: noteId,
+    title,
+    createdAt: existingRecord?.createdAt ?? now,
+    updatedAt: now,
+    patientName,
+    patientAge,
+    patientGender,
+    diagnosis,
+    visitDate,
+    languageDetected: getStringValue(result.language_detected) || undefined,
+    providerUsed: getStringValue(result.provider_used) || undefined,
+    recordingCount: getGuestRecordingCount(result),
+    translationLanguages: asStringArray(result.translation_languages),
+    pinned: existingRecord?.pinned === true,
+    pinnedAt: existingRecord?.pinnedAt,
+    transcript: input.transcript,
+    result,
+  };
+  const nextRecords = sortSavedNotes([
+    record,
+    ...records.filter((existing) => existing.id !== record.id),
+  ]) as GuestEncounterRecord[];
+
+  writeGuestEncounterRecords(guestId, nextRecords);
+
+  return record;
+};
+
+const updateGuestEncounterSummary = (
+  guestId: string,
+  encounterId: string,
+  updates: { title?: string; pinned?: boolean },
+) => {
+  const records = readGuestEncounterRecords(guestId);
+  const existingRecord = records.find((record) => record.id === encounterId);
+
+  if (!existingRecord) {
+    throw new Error("Saved note not found.");
+  }
+
+  const now = new Date().toISOString();
+  const nextPinned =
+    typeof updates.pinned === "boolean" ? updates.pinned : existingRecord.pinned;
+  const nextPinnedAt =
+    typeof updates.pinned === "boolean"
+      ? updates.pinned
+        ? existingRecord.pinnedAt ?? now
+        : undefined
+      : existingRecord.pinnedAt;
+  const nextTitle = updates.title ?? existingRecord.title;
+  const updatedRecord: GuestEncounterRecord = {
+    ...existingRecord,
+    title: nextTitle,
+    updatedAt: now,
+    pinned: nextPinned,
+    pinnedAt: nextPinnedAt,
+    result: {
+      ...existingRecord.result,
+      title: nextTitle,
+      pinned: nextPinned,
+      pinned_at: nextPinnedAt,
+    },
+  };
+  const nextRecords = sortSavedNotes([
+    updatedRecord,
+    ...records.filter((record) => record.id !== encounterId),
+  ]) as GuestEncounterRecord[];
+
+  writeGuestEncounterRecords(guestId, nextRecords);
+
+  return updatedRecord;
+};
+
+const deleteGuestEncounterRecord = (guestId: string, encounterId: string) => {
+  writeGuestEncounterRecords(
+    guestId,
+    readGuestEncounterRecords(guestId).filter(
+      (record) => record.id !== encounterId,
+    ),
+  );
+};
+
+const syncGuestRecordsToAccount = async (guestId: string) => {
+  const records = readGuestEncounterRecords(guestId);
+
+  if (records.length === 0) {
+    clearPendingGuestSync();
+    return 0;
+  }
+
+  for (const record of records) {
+    await saveEncounterRecord({
+      patientDraft: {
+        name: record.patientName,
+        age: record.patientAge === undefined ? "" : String(record.patientAge),
+        gender: record.patientGender ?? "",
+        visitDate: getDateInputValue(record.visitDate),
+        diagnosis: record.diagnosis ?? "",
+      },
+      noteJson: record.result,
+      transcript: record.transcript,
+      title: record.title,
+    });
+  }
+
+  localStorage.removeItem(getGuestRecordsKey(guestId));
+  clearPendingGuestSync();
+
+  return records.length;
+};
 
 const getTranslationLanguages = (note: NoteResult | null) =>
   asStringArray(note?.translation_languages);
@@ -676,6 +1261,12 @@ function App() {
   const [translationStatus, setTranslationStatus] = useState("");
   const [showDebugPanel, setShowDebugPanel] = useState(false);
   const [noteError, setNoteError] = useState("");
+  const [isNoteChatOpen, setIsNoteChatOpen] = useState(false);
+  const [noteChatInput, setNoteChatInput] = useState("");
+  const [noteChatMessages, setNoteChatMessages] = useState<NoteChatMessage[]>([]);
+  const [selectedNoteText, setSelectedNoteText] = useState("");
+  const [isEditingNoteWithAi, setIsEditingNoteWithAi] = useState(false);
+  const [noteChatError, setNoteChatError] = useState("");
   const [isGeneratingNote, setIsGeneratingNote] = useState(false);
   const [hasHydratedAutosave, setHasHydratedAutosave] = useState(false);
   const [autosaveStatus, setAutosaveStatus] = useState("Autosave ready");
@@ -684,12 +1275,115 @@ function App() {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
   const suppressNextAutosaveRef = useRef(false);
+  const lastPatientRecordAutosaveSignatureRef = useRef("");
+  const noteChatMessagesEndRef = useRef<HTMLDivElement | null>(null);
+  const isGuestMode = currentUser?.isGuest === true;
+  const guestId = isGuestMode ? currentUser.id : "";
 
   const cleanupRecording = () => {
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
     mediaRecorderRef.current = null;
     chunksRef.current = [];
+  };
+
+  const resetNoteChat = () => {
+    setIsNoteChatOpen(false);
+    setNoteChatInput("");
+    setNoteChatMessages([]);
+    setSelectedNoteText("");
+    setNoteChatError("");
+    setIsEditingNoteWithAi(false);
+  };
+
+  const loadNoteChatHistory = (note: NoteResult | null) => {
+    setNoteChatMessages(getNoteChatHistory(note));
+    setNoteChatInput("");
+    setSelectedNoteText("");
+    setNoteChatError("");
+    setIsEditingNoteWithAi(false);
+  };
+
+  const saveNoteChatHistory = (chatHistory: NoteChatMessage[]) => {
+    const nextHistory = chatHistory.slice(-NOTE_CHAT_HISTORY_LIMIT);
+
+    setNoteChatMessages(nextHistory);
+    setBaseNoteResult((current) => withNoteChatHistory(current, nextHistory));
+    setNoteResult((current) =>
+      activeNoteLanguage === "Original"
+        ? withNoteChatHistory(current, nextHistory)
+        : current,
+    );
+  };
+
+  const captureSelectedNoteText = () => {
+    const selectedText = window.getSelection()?.toString().trim() ?? "";
+
+    if (selectedText) {
+      setSelectedNoteText(selectedText.replace(/\s+/g, " ").slice(0, 8000));
+    }
+  };
+
+  const enterGuestMode = () => {
+    setGuestModeActive(true);
+    setAuthError("");
+    setCurrentUser(makeGuestUser());
+    setStatus("Guest mode");
+  };
+
+  const startGuestAccountSync = (mode: AuthMode) => {
+    if (guestId) {
+      setPendingGuestSync(guestId);
+    }
+
+    setGuestModeActive(false);
+    setAuthMode(mode);
+    setAuthError(
+      mode === "signup"
+        ? "Create an account to sync your guest notes."
+        : "Sign in to sync your guest notes.",
+    );
+    setCurrentUser(null);
+  };
+
+  const completeSupabaseAuth = async (user: User) => {
+    const nextUser = toCurrentUser(user);
+    const pendingGuestId = getPendingGuestSync();
+
+    setGuestModeActive(false);
+
+    if (pendingGuestId) {
+      try {
+        const syncedCount = await syncGuestRecordsToAccount(pendingGuestId);
+
+        if (syncedCount > 0) {
+          setStatus(
+            `Synced ${syncedCount} guest note${syncedCount === 1 ? "" : "s"}`,
+          );
+          setNoteResult(null);
+          setBaseNoteResult(null);
+          resetNoteChat();
+          setCurrentNoteTranscript("");
+          setCurrentNoteRecordings([]);
+          setCurrentNoteTitle("");
+          setCurrentEncounterId("");
+          setPatientDraft(getPatientDraftFromNote(null));
+          setPatientRecordStatus("Guest notes synced to your account.");
+          setActiveNoteLanguage("Original");
+          setSelectedTranslationLanguage("");
+          window.history.pushState(null, "", VIEW_PATHS.dashboard);
+          setActiveView("dashboard");
+        }
+      } catch (syncError) {
+        setVaultError(
+          syncError instanceof Error
+            ? `Signed in, but guest notes were not synced: ${syncError.message}`
+            : "Signed in, but guest notes were not synced.",
+        );
+      }
+    }
+
+    setCurrentUser(nextUser);
   };
 
   const handleAuthSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -730,7 +1424,7 @@ function App() {
           return;
         }
 
-        setCurrentUser(toCurrentUser(data.user));
+        await completeSupabaseAuth(data.user);
       } else {
         const { data, error: signInError } =
           await supabase.auth.signInWithPassword({
@@ -742,7 +1436,7 @@ function App() {
           throw signInError ?? new Error("Unable to sign in.");
         }
 
-        setCurrentUser(toCurrentUser(data.user));
+        await completeSupabaseAuth(data.user);
       }
 
       setAuthPassword("");
@@ -764,10 +1458,14 @@ function App() {
     setIsLoggingOut(true);
 
     try {
-      const { error: signOutError } = await supabase.auth.signOut();
+      if (isGuestMode) {
+        setGuestModeActive(false);
+      } else {
+        const { error: signOutError } = await supabase.auth.signOut();
 
-      if (signOutError) {
-        throw signOutError;
+        if (signOutError) {
+          throw signOutError;
+        }
       }
 
       cleanupRecording();
@@ -775,6 +1473,7 @@ function App() {
       setTranscript("");
       setNoteResult(null);
       setBaseNoteResult(null);
+      resetNoteChat();
       setCurrentNoteTranscript("");
       setCurrentEncounterId("");
       setPatientDraft(getPatientDraftFromNote(null));
@@ -801,9 +1500,13 @@ function App() {
     setVaultError("");
 
     try {
-      const notes = sortSavedNotes(
-        (await listEncounterSummaries()).map(toSavedNoteSummary),
-      );
+      const notes = isGuestMode
+        ? sortSavedNotes(
+            readGuestEncounterRecords(guestId).map(toSavedNoteSummary),
+          )
+        : sortSavedNotes(
+            (await listEncounterSummaries()).map(toSavedNoteSummary),
+          );
 
       setSavedNotes(notes);
       return notes;
@@ -835,21 +1538,36 @@ function App() {
     setVaultError("");
 
     try {
-      const note = await getEncounterDetail(noteId);
-      const noteResultDraft = note.result as NoteResult;
+      const note = isGuestMode
+        ? readGuestEncounterRecords(guestId).find((record) => record.id === noteId)
+        : await getEncounterDetail(noteId);
 
-      setBaseNoteResult(noteResultDraft);
-      setNoteResult(noteResultDraft);
-      setCurrentNoteTitle(note.title);
-      setCurrentNoteTranscript(note.transcript);
-      setCurrentEncounterId(note.id);
-      setPatientDraft({
+      if (!note) {
+        throw new Error("Saved note not found.");
+      }
+
+      const noteResultDraft = note.result as NoteResult;
+      const nextPatientDraft = {
         ...getPatientDraftFromNote(noteResultDraft),
         name: note.patientName,
         age: note.patientAge === undefined ? "" : String(note.patientAge),
         gender: note.patientGender ?? "",
         visitDate: getDateInputValue(note.visitDate),
         diagnosis: note.diagnosis ?? "",
+      };
+
+      setBaseNoteResult(noteResultDraft);
+      setNoteResult(noteResultDraft);
+      loadNoteChatHistory(noteResultDraft);
+      setCurrentNoteTitle(note.title);
+      setCurrentNoteTranscript(note.transcript);
+      setCurrentEncounterId(note.id);
+      setPatientDraft(nextPatientDraft);
+      lastPatientRecordAutosaveSignatureRef.current = JSON.stringify({
+        note: toNoteRecord(noteResultDraft),
+        patientDraft: nextPatientDraft,
+        title: note.title,
+        transcript: note.transcript,
       });
       setPatientRecordStatus("Patient record loaded.");
       setPendingRecordings([]);
@@ -874,7 +1592,9 @@ function App() {
 
     try {
       const updatedNote = toSavedNoteSummary(
-        await updateEncounterSummary(noteId, updates),
+        isGuestMode
+          ? updateGuestEncounterSummary(guestId, noteId, updates)
+          : await updateEncounterSummary(noteId, updates),
       );
 
       setSavedNotes((currentNotes) =>
@@ -938,7 +1658,11 @@ function App() {
     setVaultError("");
 
     try {
-      await deleteEncounterRecord(note.id);
+      if (isGuestMode) {
+        deleteGuestEncounterRecord(guestId, note.id);
+      } else {
+        await deleteEncounterRecord(note.id);
+      }
 
       setSavedNotes((currentNotes) =>
         currentNotes.filter((savedNote) => savedNote.id !== note.id),
@@ -947,6 +1671,7 @@ function App() {
       if (currentEncounterId === note.id) {
         setNoteResult(null);
         setBaseNoteResult(null);
+        resetNoteChat();
         setCurrentNoteRecordings([]);
         setCurrentNoteTranscript("");
         setCurrentNoteTitle("");
@@ -963,6 +1688,14 @@ function App() {
       );
     }
   };
+
+  const getPatientRecordAutosaveSignature = (source: NoteResult | null) =>
+    JSON.stringify({
+      note: toNoteRecord(source),
+      patientDraft,
+      title: currentNoteTitle,
+      transcript: currentNoteTranscript,
+    });
 
   const showOriginalNote = (language = getOriginalNoteLanguage(baseNoteResult)) => {
     if (!baseNoteResult) {
@@ -1021,8 +1754,18 @@ function App() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ noteId, language, force }),
-      });
+        body: JSON.stringify({
+          noteId,
+          language,
+          force,
+          ...(isGuestMode
+            ? {
+                note: toNoteRecord(baseNoteResult ?? noteResult),
+                title: currentNoteTitle,
+              }
+            : {}),
+        }),
+      }, isGuestMode ? { guestId } : {});
       const responseJson = (await parseJsonResponse(
         response,
         "The translation endpoint returned invalid JSON.",
@@ -1054,13 +1797,21 @@ function App() {
       setLanguageSearch("");
 
       if (currentEncounterId) {
-        const savedEncounter = await saveEncounterRecord({
-          encounterId: currentEncounterId,
-          patientDraft,
-          noteJson: toNoteRecord(nextBaseNoteResult),
-          transcript: currentNoteTranscript,
-          title: responseJson.title ?? currentNoteTitle,
-        });
+        const savedEncounter = isGuestMode
+          ? saveGuestEncounterRecord(guestId, {
+              encounterId: currentEncounterId,
+              patientDraft,
+              noteJson: toNoteRecord(nextBaseNoteResult),
+              transcript: currentNoteTranscript,
+              title: responseJson.title ?? currentNoteTitle,
+            })
+          : await saveEncounterRecord({
+              encounterId: currentEncounterId,
+              patientDraft,
+              noteJson: toNoteRecord(nextBaseNoteResult),
+              transcript: currentNoteTranscript,
+              title: responseJson.title ?? currentNoteTitle,
+            });
 
         setSavedNotes((currentNotes) =>
           upsertSavedNoteSummary(currentNotes, toSavedNoteSummary(savedEncounter)),
@@ -1079,6 +1830,131 @@ function App() {
     }
   };
 
+  const clearNoteChatHistory = () => {
+    if (!baseNoteResult && !noteResult) {
+      return;
+    }
+
+    if (
+      noteChatMessages.length > 0 &&
+      !window.confirm("Clear ClinicScribe AI chat history for this note?")
+    ) {
+      return;
+    }
+
+    saveNoteChatHistory([]);
+    setNoteChatInput("");
+    setSelectedNoteText("");
+    setNoteChatError("");
+    setPatientRecordStatus("Chat history cleared. Autosave will update this note.");
+  };
+
+  const sendNoteChatMessage = async () => {
+    const source = baseNoteResult ?? noteResult;
+    const message = noteChatInput.trim();
+
+    if (!source) {
+      setNoteChatError("Open or generate a note before chatting.");
+      return;
+    }
+
+    if (!message) {
+      return;
+    }
+
+    const selectedText = selectedNoteText.trim();
+    const userMessage: NoteChatMessage = {
+      id: createNoteChatMessageId(),
+      role: "user",
+      content: message,
+      selectedText: selectedText || undefined,
+      createdAt: new Date().toISOString(),
+    };
+    const historyWithUserMessage = [
+      ...noteChatMessages,
+      userMessage,
+    ].slice(-NOTE_CHAT_HISTORY_LIMIT);
+
+    saveNoteChatHistory(historyWithUserMessage);
+    setNoteChatInput("");
+    setNoteChatError("");
+    setIsEditingNoteWithAi(true);
+
+    try {
+      const response = await apiFetch("/api/edit-note", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          note: toNoteRecord(source),
+          message,
+          selectedText,
+          chatHistory: historyWithUserMessage.slice(-12),
+        }),
+      }, isGuestMode ? { guestId } : {});
+      const responseJson = (await parseJsonResponse(
+        response,
+        "The note editor endpoint returned invalid JSON.",
+      )) as EditNoteResponse;
+
+      if (!response.ok || !responseJson.result) {
+        throw new Error(getErrorMessage(responseJson, "Unable to edit note."));
+      }
+
+      const assistantMessage: NoteChatMessage = {
+        id: createNoteChatMessageId(),
+        role: "assistant",
+        content: responseJson.message || "Updated the note.",
+        createdAt: new Date().toISOString(),
+      };
+      const nextHistory = [
+        ...historyWithUserMessage,
+        assistantMessage,
+      ].slice(-NOTE_CHAT_HISTORY_LIMIT);
+      const responseLanguages = getTranslationLanguages(responseJson.result);
+      const editedNote: NoteResult = {
+        ...source,
+        ...responseJson.result,
+        note_id: getNoteId(responseJson.result) || getNoteId(source),
+        title:
+          getStringValue(responseJson.result.title) ||
+          currentNoteTitle ||
+          getStringValue(source.title),
+        saved_at: source.saved_at ?? responseJson.result.saved_at,
+        recordings: source.recordings ?? responseJson.result.recordings,
+        pinned: source.pinned ?? responseJson.result.pinned,
+        pinned_at: source.pinned_at ?? responseJson.result.pinned_at,
+        translation_languages:
+          responseLanguages.length > 0
+            ? responseJson.result.translation_languages
+            : source.translation_languages,
+        chat_history: nextHistory,
+      };
+
+      setBaseNoteResult(editedNote);
+      setNoteResult(editedNote);
+      setNoteChatMessages(nextHistory);
+      setCurrentNoteTitle(getStringValue(editedNote.title));
+      setPatientDraft(getPatientDraftFromNote(editedNote));
+      setActiveNoteLanguage("Original");
+      setSelectedTranslationLanguage("");
+      setTranslationStatus("ClinicScribe AI edited the original note.");
+      setSelectedNoteText("");
+      setPatientRecordStatus(
+        "ClinicScribe AI updated the note. Autosave will save it.",
+      );
+    } catch (editError) {
+      setNoteChatError(
+        editError instanceof Error
+          ? editError.message
+          : "Unable to edit the note.",
+      );
+    } finally {
+      setIsEditingNoteWithAi(false);
+    }
+  };
+
   const transcribeAudio = async (audioBlob: Blob) => {
     setIsUploading(true);
     setStatus("Uploading audio");
@@ -1094,7 +1970,7 @@ function App() {
       const response = await apiFetch("/api/transcribe", {
         method: "POST",
         body: formData,
-      });
+      }, isGuestMode ? { guestId } : {});
 
       const responseText = await response.text();
       let responseJson: unknown;
@@ -1140,6 +2016,7 @@ function App() {
       );
       setNoteResult(null);
       setBaseNoteResult(null);
+      resetNoteChat();
       setCurrentNoteRecordings([]);
       setCurrentNoteTranscript("");
       setCurrentNoteTitle("");
@@ -1276,6 +2153,7 @@ function App() {
     setIsGeneratingNote(true);
     setNoteError("");
     setNoteResult(null);
+    resetNoteChat();
 
     try {
       const response = await apiFetch("/api/make-note", {
@@ -1290,7 +2168,7 @@ function App() {
             transcript: recording.transcript,
           })),
         }),
-      });
+      }, isGuestMode ? { guestId } : {});
 
       const responseText = await response.text();
       let responseJson: unknown;
@@ -1317,6 +2195,7 @@ function App() {
 
       setNoteResult(generatedNote);
       setBaseNoteResult(generatedNote);
+      loadNoteChatHistory(generatedNote);
       setCurrentNoteTranscript(transcriptForNote);
       setCurrentEncounterId("");
       setPatientDraft(getPatientDraftFromNote(generatedNote));
@@ -1342,26 +2221,38 @@ function App() {
     }
   };
 
-  const saveCurrentPatientRecord = async () => {
+  const saveCurrentPatientRecord = async (
+    options: { silent?: boolean; signature?: string } = {},
+  ) => {
     const source = baseNoteResult ?? noteResult;
 
     if (!source) {
-      setNoteError("Generate or open a note before saving a patient record.");
+      if (!options.silent) {
+        setNoteError("Generate or open a note before saving a patient record.");
+      }
       return;
     }
 
     setIsSavingPatientRecord(true);
     setNoteError("");
-    setPatientRecordStatus("");
+    setPatientRecordStatus(options.silent ? "Autosaving..." : "");
 
     try {
-      const savedEncounter = await saveEncounterRecord({
-        encounterId: currentEncounterId || undefined,
-        patientDraft,
-        noteJson: toNoteRecord(source),
-        transcript: currentNoteTranscript,
-        title: currentNoteTitle,
-      });
+      const savedEncounter = isGuestMode
+        ? saveGuestEncounterRecord(guestId, {
+            encounterId: currentEncounterId || undefined,
+            patientDraft,
+            noteJson: toNoteRecord(source),
+            transcript: currentNoteTranscript,
+            title: currentNoteTitle,
+          })
+        : await saveEncounterRecord({
+            encounterId: currentEncounterId || undefined,
+            patientDraft,
+            noteJson: toNoteRecord(source),
+            transcript: currentNoteTranscript,
+            title: currentNoteTitle,
+          });
       const savedSummary = toSavedNoteSummary(savedEncounter);
       const savedNoteResult = savedEncounter.result as NoteResult;
 
@@ -1386,17 +2277,26 @@ function App() {
       setSavedNotes((currentNotes) =>
         upsertSavedNoteSummary(currentNotes, savedSummary),
       );
+      lastPatientRecordAutosaveSignatureRef.current =
+        options.signature || getPatientRecordAutosaveSignature(savedNoteResult);
       setPatientRecordStatus(
-        currentEncounterId
-          ? "Patient record updated."
-          : "Patient record saved to dashboard.",
+        options.silent
+          ? `Autosaved at ${getAutosaveTimeLabel()}`
+          : currentEncounterId
+            ? "Patient record updated."
+            : "Patient record saved to dashboard.",
       );
     } catch (saveError) {
-      setNoteError(
+      const message =
         saveError instanceof Error
           ? saveError.message
-          : "Unable to save patient record.",
-      );
+          : "Unable to save patient record.";
+
+      if (options.silent) {
+        setPatientRecordStatus(`Autosave failed: ${message}`);
+      } else {
+        setNoteError(message);
+      }
     } finally {
       setIsSavingPatientRecord(false);
     }
@@ -1417,7 +2317,11 @@ function App() {
         }
 
         if (isMounted) {
-          setCurrentUser(session?.user ? toCurrentUser(session.user) : null);
+          if (session?.user) {
+            await completeSupabaseAuth(session.user);
+          } else {
+            setCurrentUser(getActiveGuestUser());
+          }
         }
       } catch (authCheckError) {
         if (isMounted) {
@@ -1439,7 +2343,14 @@ function App() {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
       if (isMounted) {
-        setCurrentUser(session?.user ? toCurrentUser(session.user) : null);
+        if (session?.user) {
+          if (!getPendingGuestSync()) {
+            setGuestModeActive(false);
+            setCurrentUser(toCurrentUser(session.user));
+          }
+        } else {
+          setCurrentUser(getActiveGuestUser());
+        }
       }
     });
 
@@ -1476,6 +2387,14 @@ function App() {
   }, [currentUser]);
 
   useEffect(() => {
+    if (!isNoteChatOpen) {
+      return;
+    }
+
+    noteChatMessagesEndRef.current?.scrollIntoView({ block: "end" });
+  }, [isNoteChatOpen, isEditingNoteWithAi, noteChatMessages]);
+
+  useEffect(() => {
     if (!currentUser) {
       setHasHydratedAutosave(false);
       return;
@@ -1508,6 +2427,7 @@ function App() {
       setTranscript(typeof draft.transcript === "string" ? draft.transcript : "");
       setNoteResult(restoredNote);
       setBaseNoteResult(restoredBaseNote);
+      loadNoteChatHistory(restoredBaseNote ?? restoredNote);
       setCurrentNoteTranscript(
         typeof draft.currentNoteTranscript === "string"
           ? draft.currentNoteTranscript
@@ -1627,6 +2547,47 @@ function App() {
     pendingRecordings,
     selectedTranslationLanguage,
     transcript,
+  ]);
+
+  useEffect(() => {
+    const source = baseNoteResult ?? noteResult;
+
+    if (
+      !currentUser ||
+      activeView !== "note" ||
+      !source ||
+      !currentNoteTranscript.trim() ||
+      isGeneratingNote ||
+      isTranslating ||
+      isSavingPatientRecord
+    ) {
+      return;
+    }
+
+    const signature = getPatientRecordAutosaveSignature(source);
+
+    if (signature === lastPatientRecordAutosaveSignatureRef.current) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void saveCurrentPatientRecord({ silent: true, signature });
+    }, NOTE_RECORD_AUTOSAVE_DELAY_MS);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [
+    activeView,
+    baseNoteResult,
+    currentNoteTitle,
+    currentNoteTranscript,
+    currentUser,
+    isGeneratingNote,
+    isSavingPatientRecord,
+    isTranslating,
+    noteResult,
+    patientDraft,
   ]);
 
   useEffect(() => {
@@ -1810,6 +2771,18 @@ function App() {
             >
               {isSignup ? "I already have an account" : "Create an account"}
             </button>
+
+            <button
+              className="mt-3 w-full rounded-lg border border-zinc-300 px-4 py-3 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
+              onClick={enterGuestMode}
+              type="button"
+            >
+              Continue as guest
+            </button>
+            <p className="mt-3 text-xs leading-5 text-zinc-500">
+              Guest records stay in this browser. Create an account from guest
+              mode to sync them.
+            </p>
           </div>
         </section>
       </main>
@@ -1911,13 +2884,23 @@ function App() {
         ? "Clinical notes faster, clearer, and ready for review."
         : "";
 
-        //hi
-
   return (
     <main className="min-h-screen bg-zinc-100 px-4 py-8 text-zinc-950 sm:px-6 lg:px-8">
       <section className="mx-auto flex max-w-5xl flex-col gap-6">
-        <div className="rounded-[2rem] border border-zinc-200 bg-white p-6 shadow-sm sm:p-8">
-          <div className="mb-6 flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+        <div
+          className={`border border-zinc-200 bg-white shadow-sm ${
+            activeView === "note"
+              ? "rounded-2xl p-4"
+              : "rounded-[2rem] p-6 sm:p-8"
+          }`}
+        >
+          <div
+            className={`flex flex-col lg:flex-row lg:justify-between ${
+              activeView === "note"
+                ? "gap-3 lg:items-center"
+                : "mb-6 gap-5 lg:items-start"
+            }`}
+          >
             <div className="flex min-w-0 items-start gap-4">
               <div className="min-w-0">
                 {activeView === "scribe" ? (
@@ -1927,7 +2910,11 @@ function App() {
                     src={BRAND_LOGO_SRC}
                   />
                 ) : (
-                  <h1 className="text-2xl font-semibold tracking-normal text-zinc-950">
+                  <h1
+                    className={`font-semibold tracking-normal text-zinc-950 ${
+                      activeView === "note" ? "text-xl" : "text-2xl"
+                    }`}
+                  >
                     {pageTitle}
                   </h1>
                 )}
@@ -1943,25 +2930,72 @@ function App() {
               </div>
             </div>
 
-            <div className="shrink-0 rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm">
-              <p className="font-medium text-zinc-700">Signed in</p>
+            <div
+              className={`shrink-0 border border-zinc-200 bg-zinc-50 ${
+                activeView === "note"
+                  ? "rounded-lg px-3 py-2 text-xs"
+                  : "rounded-2xl px-4 py-3 text-sm"
+              }`}
+            >
+              <p className="font-medium text-zinc-700">
+                {isGuestMode ? "Guest mode" : "Signed in"}
+              </p>
               <p className="mt-1 text-zinc-950">{currentUser.name}</p>
               <p className="mt-1 text-xs text-zinc-500">{currentUser.email}</p>
-              <button
-                className="mt-3 rounded-lg border border-zinc-300 px-3 py-2 text-xs font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-white"
-                disabled={isLoggingOut}
-                onClick={() => void handleLogout()}
-                type="button"
-              >
-                {isLoggingOut ? "Signing out..." : "Sign out"}
-              </button>
+              {isGuestMode ? (
+                <div
+                  className={`flex flex-wrap gap-2 ${
+                    activeView === "note" ? "mt-2" : "mt-3"
+                  }`}
+                >
+                  <button
+                    className="rounded-lg border border-zinc-300 px-3 py-2 text-xs font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-white"
+                    onClick={() => startGuestAccountSync("signup")}
+                    type="button"
+                  >
+                    Create account
+                  </button>
+                  <button
+                    className="rounded-lg border border-zinc-300 px-3 py-2 text-xs font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-white"
+                    onClick={() => startGuestAccountSync("login")}
+                    type="button"
+                  >
+                    Sign in
+                  </button>
+                  <button
+                    className="rounded-lg border border-zinc-300 px-3 py-2 text-xs font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-white"
+                    disabled={isLoggingOut}
+                    onClick={() => void handleLogout()}
+                    type="button"
+                  >
+                    {isLoggingOut ? "Exiting..." : "Exit guest"}
+                  </button>
+                </div>
+              ) : (
+                <button
+                  className={`rounded-lg border border-zinc-300 px-3 py-2 text-xs font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-white ${
+                    activeView === "note" ? "mt-2" : "mt-3"
+                  }`}
+                  disabled={isLoggingOut}
+                  onClick={() => void handleLogout()}
+                  type="button"
+                >
+                  {isLoggingOut ? "Signing out..." : "Sign out"}
+                </button>
+              )}
             </div>
           </div>
 
-          <div className="mb-6 flex flex-wrap gap-2">
+          <div
+            className={`flex flex-wrap gap-2 ${
+              activeView === "note" ? "mt-3" : "mb-6"
+            }`}
+          >
             {activeView !== "scribe" ? (
               <button
-                className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
+                className={`rounded-lg border border-zinc-300 font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50 ${
+                  activeView === "note" ? "px-3 py-2 text-xs" : "px-4 py-2 text-sm"
+                }`}
                 onClick={() => navigateToView("scribe")}
                 type="button"
               >
@@ -1971,7 +3005,9 @@ function App() {
 
             {activeView !== "dashboard" ? (
               <button
-                className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
+                className={`rounded-lg border border-zinc-300 font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50 ${
+                  activeView === "note" ? "px-3 py-2 text-xs" : "px-4 py-2 text-sm"
+                }`}
                 onClick={() => navigateToView("dashboard")}
                 type="button"
               >
@@ -1980,14 +3016,12 @@ function App() {
             ) : null}
 
             {activeView === "dashboard" ? (
-              <button
-                className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
+              <IconButton
                 disabled={isLoadingNotes}
+                icon="refresh"
+                label={isLoadingNotes ? "Refreshing" : "Refresh"}
                 onClick={() => void loadSavedNotes()}
-                type="button"
-              >
-                {isLoadingNotes ? "Refreshing..." : "Refresh"}
-              </button>
+              />
             ) : null}
           </div>
 
@@ -2045,9 +3079,16 @@ function App() {
                         onClick={() => void openSavedNote(savedNote.id)}
                         type="button"
                       >
-                        <p className="font-semibold text-zinc-950">
-                          {savedNote.pinned ? "Pinned - " : ""}
-                          {savedNote.patientName || savedNote.title}
+                        <p className="flex items-center gap-2 font-semibold text-zinc-950">
+                          {savedNote.pinned ? (
+                            <span
+                              className="inline-flex text-zinc-700"
+                              title="Pinned"
+                            >
+                              <Icon name="pin" />
+                            </span>
+                          ) : null}
+                          <span>{savedNote.patientName || savedNote.title}</span>
                         </p>
                         <p className="mt-1 text-sm text-zinc-500">
                           {savedNote.patientAge !== undefined
@@ -2080,27 +3121,22 @@ function App() {
                       </button>
 
                       <div className="flex flex-wrap gap-2">
-                        <button
-                          className="rounded-lg border border-zinc-300 px-3 py-2 text-xs font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-white"
+                        <IconButton
+                          icon={savedNote.pinned ? "pinOff" : "pin"}
+                          label={savedNote.pinned ? "Unpin" : "Pin"}
                           onClick={() => togglePinnedNote(savedNote)}
-                          type="button"
-                        >
-                          {savedNote.pinned ? "Unpin" : "Pin"}
-                        </button>
-                        <button
-                          className="rounded-lg border border-zinc-300 px-3 py-2 text-xs font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-white"
+                        />
+                        <IconButton
+                          icon="pen"
+                          label="Rename"
                           onClick={() => renameSavedNote(savedNote)}
-                          type="button"
-                        >
-                          Rename
-                        </button>
-                        <button
-                          className="rounded-lg border border-red-200 px-3 py-2 text-xs font-semibold text-red-700 transition hover:border-red-300 hover:bg-red-50"
+                        />
+                        <IconButton
+                          danger
+                          icon="trash"
+                          label="Delete"
                           onClick={() => void deleteSavedNote(savedNote)}
-                          type="button"
-                        >
-                          Delete
-                        </button>
+                        />
                       </div>
                     </div>
                   </div>
@@ -2116,6 +3152,7 @@ function App() {
               setTranscript(event.target.value);
               setNoteResult(null);
               setBaseNoteResult(null);
+              resetNoteChat();
               setCurrentNoteTranscript("");
               setCurrentNoteTitle("");
               setCurrentEncounterId("");
@@ -2149,29 +3186,25 @@ function App() {
               ) : null}
             </div>
 
-            <div className="flex flex-col gap-2 sm:flex-row">
-              <button
-                className="rounded-lg border border-zinc-300 px-5 py-3 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:border-zinc-200 disabled:text-zinc-400"
+            <div className="flex flex-wrap gap-2">
+              <IconButton
                 disabled={
                   !hasCurrentDraft ||
                   isRecording ||
                   isUploading ||
                   isGeneratingNote
                 }
+                icon="eraser"
+                label="Clear transcript"
                 onClick={clearCurrentTranscript}
-                type="button"
-              >
-                Clear transcript
-              </button>
+              />
 
-              <button
-                className="rounded-lg border border-zinc-300 px-5 py-3 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:border-zinc-200 disabled:text-zinc-400"
+              <IconButton
                 disabled={isUploading}
+                icon={isRecording ? "stop" : "mic"}
+                label={isRecording ? "Stop recording" : "Start recording"}
                 onClick={handleButtonClick}
-                type="button"
-              >
-                {isRecording ? "Stop recording" : "Start recording"}
-              </button>
+              />
 
               <button
                 className="rounded-lg bg-zinc-950 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
@@ -2223,7 +3256,11 @@ function App() {
           ) : null}
 
           {noteResult ? (
-            <div className="mt-6 space-y-6">
+            <div
+              className="mt-6 space-y-6"
+              onKeyUp={captureSelectedNoteText}
+              onMouseUp={captureSelectedNoteText}
+            >
               <section className="rounded-2xl border border-zinc-200 p-5">
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                   <div>
@@ -2350,22 +3387,15 @@ function App() {
                       Detected patient info
                     </h3>
                     <p className="mt-1 text-sm text-zinc-500">
-                      Review the AI fields before saving this encounter.
+                      Review or edit these fields. Changes autosave to the dashboard.
                     </p>
                   </div>
 
-                  <button
-                    className="rounded-lg bg-zinc-950 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
-                    disabled={isSavingPatientRecord}
-                    onClick={() => void saveCurrentPatientRecord()}
-                    type="button"
-                  >
+                  <p className="rounded-lg bg-zinc-50 px-3 py-2 text-sm text-zinc-600">
                     {isSavingPatientRecord
-                      ? "Saving..."
-                      : currentEncounterId
-                        ? "Update dashboard"
-                        : "Save to dashboard"}
-                  </button>
+                      ? "Autosaving..."
+                      : patientRecordStatus || "Autosave ready"}
+                  </p>
                 </div>
 
                 <div className="mt-4 grid gap-4 md:grid-cols-2">
@@ -2451,11 +3481,6 @@ function App() {
                   </label>
                 </div>
 
-                {patientRecordStatus ? (
-                  <p className="mt-4 rounded-lg bg-zinc-50 px-3 py-2 text-sm text-zinc-600">
-                    {patientRecordStatus}
-                  </p>
-                ) : null}
               </section>
 
               {currentNoteTranscript.trim() ? (
@@ -2582,6 +3607,159 @@ function App() {
         </div>
         ) : null}
       </section>
+
+      {activeView === "note" && noteResult ? (
+        <>
+          {isNoteChatOpen ? (
+            <aside className="fixed bottom-20 left-4 z-30 flex max-h-[70vh] w-[calc(100vw-2rem)] max-w-md flex-col rounded-2xl border border-zinc-200 bg-white shadow-xl sm:left-6">
+              <div className="flex items-start justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+                <div>
+                  <p className="text-sm font-semibold text-zinc-950">
+                    ClinicScribe AI
+                  </p>
+                  <p className="mt-1 text-xs text-zinc-500">
+                    Ask for edits. Highlight note text first to target a section.
+                  </p>
+                </div>
+                <div className="flex shrink-0 gap-2">
+                  <button
+                    className="rounded-lg border border-zinc-300 px-3 py-2 text-xs font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:text-zinc-400"
+                    disabled={noteChatMessages.length === 0 || isEditingNoteWithAi}
+                    onClick={clearNoteChatHistory}
+                    title="Clear chat history"
+                    type="button"
+                  >
+                    Clear
+                  </button>
+                  <IconButton
+                    disabled={isEditingNoteWithAi}
+                    icon="x"
+                    label="Close ClinicScribe AI chat"
+                    onClick={() => setIsNoteChatOpen(false)}
+                  />
+                </div>
+              </div>
+
+              <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+                {noteChatMessages.length > 0 ? (
+                  noteChatMessages.map((message) => (
+                    <div
+                      className={`flex ${
+                        message.role === "user" ? "justify-end" : "justify-start"
+                      }`}
+                      key={message.id}
+                    >
+                      <div
+                        className={`max-w-[85%] rounded-xl px-3 py-2 text-sm leading-6 ${
+                          message.role === "user"
+                            ? "bg-zinc-950 text-white"
+                            : "bg-zinc-100 text-zinc-800"
+                        }`}
+                      >
+                        {message.selectedText ? (
+                          <p className="mb-2 border-b border-current/20 pb-2 text-xs opacity-80">
+                            Selection: {message.selectedText}
+                          </p>
+                        ) : null}
+                        <p className="whitespace-pre-wrap">{message.content}</p>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="rounded-xl bg-zinc-50 px-3 py-3 text-sm leading-6 text-zinc-500">
+                    Try: "Make the plan more concise" or highlight one sentence
+                    and ask me to rewrite it.
+                  </div>
+                )}
+
+                {isEditingNoteWithAi ? (
+                  <p className="text-sm text-zinc-500">Editing note...</p>
+                ) : null}
+                <div ref={noteChatMessagesEndRef} />
+              </div>
+
+              {selectedNoteText ? (
+                <div className="border-t border-zinc-200 px-4 py-3">
+                  <div className="rounded-xl bg-zinc-50 px-3 py-2 text-xs leading-5 text-zinc-600">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="font-semibold text-zinc-800">
+                        Selected note text
+                      </p>
+                      <button
+                        className="text-xs font-semibold text-zinc-600 underline-offset-2 hover:underline"
+                        onClick={() => setSelectedNoteText("")}
+                        type="button"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                    <p className="mt-1 line-clamp-3">{selectedNoteText}</p>
+                  </div>
+                </div>
+              ) : null}
+
+              {noteChatError ? (
+                <div className="border-t border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
+                  {noteChatError}
+                </div>
+              ) : null}
+
+              <form
+                className="border-t border-zinc-200 p-4"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void sendNoteChatMessage();
+                }}
+              >
+                <label className="sr-only" htmlFor="note-chat-message">
+                  Message ClinicScribe AI
+                </label>
+                <textarea
+                  className="max-h-36 min-h-24 w-full resize-y rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-950 outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100 disabled:cursor-not-allowed disabled:text-zinc-400"
+                  disabled={isEditingNoteWithAi}
+                  id="note-chat-message"
+                  onChange={(event) => setNoteChatInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      void sendNoteChatMessage();
+                    }
+                  }}
+                  placeholder="Tell ClinicScribe AI what to change..."
+                  value={noteChatInput}
+                />
+                <div className="mt-3 flex items-center justify-between gap-3">
+                  <p className="text-xs text-zinc-500">
+                    Enter sends. Shift+Enter adds a line.
+                  </p>
+                  <button
+                    className="inline-flex items-center gap-2 rounded-lg bg-zinc-950 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
+                    disabled={isEditingNoteWithAi || !noteChatInput.trim()}
+                    title="Send message"
+                    type="submit"
+                  >
+                    <Icon name="send" />
+                    Send
+                  </button>
+                </div>
+              </form>
+            </aside>
+          ) : null}
+
+          <button
+            aria-label="Open ClinicScribe AI chat"
+            className="fixed bottom-5 left-4 z-30 inline-flex h-12 w-12 items-center justify-center rounded-lg border border-zinc-300 bg-white text-zinc-800 shadow-lg transition hover:border-zinc-400 hover:bg-zinc-50 sm:left-6"
+            onClick={() => {
+              setIsNoteChatOpen((current) => !current);
+              setNoteChatError("");
+            }}
+            title="ClinicScribe AI"
+            type="button"
+          >
+            <Icon name="chat" />
+          </button>
+        </>
+      ) : null}
     </main>
   );
 }
