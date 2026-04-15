@@ -358,6 +358,16 @@ const getNoteId = (note: NoteResult | null) => getStringValue(note?.note_id);
 const toNoteRecord = (note: NoteResult | null): Record<string, unknown> =>
   note && typeof note === "object" ? (note as Record<string, unknown>) : {};
 
+const toLocalDateInputValue = (date: Date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+};
+
+const getTodayDateInputValue = () => toLocalDateInputValue(new Date());
+
 const getDateInputValue = (value: unknown) => {
   const rawValue = getStringValue(value);
 
@@ -371,7 +381,7 @@ const getDateInputValue = (value: unknown) => {
 
   const date = new Date(rawValue);
 
-  return Number.isNaN(date.getTime()) ? "" : date.toISOString().slice(0, 10);
+  return Number.isNaN(date.getTime()) ? "" : toLocalDateInputValue(date);
 };
 
 const getAgeInputValue = (value: unknown) => {
@@ -391,7 +401,7 @@ const getPatientDraftFromNote = (note: NoteResult | null): PatientDraft => {
     name: getStringValue(patient.name),
     age: getAgeInputValue(patient.age),
     gender: getStringValue(patient.gender),
-    visitDate: getDateInputValue(encounter.visit_date),
+    visitDate: getDateInputValue(encounter.visit_date) || getTodayDateInputValue(),
     diagnosis:
       getStringValue(encounter.diagnosis) || getStringValue(soap.assessment),
   };
