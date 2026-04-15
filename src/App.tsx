@@ -1897,6 +1897,8 @@ function App() {
         ? noteHeading || "Review the generated documentation."
         : "Clinical notes faster, clearer, and ready for review.";
 
+        //hi
+
   return (
     <main className="min-h-screen bg-zinc-100 px-4 py-8 text-zinc-950 sm:px-6 lg:px-8">
       <section className="mx-auto flex max-w-5xl flex-col gap-6">
