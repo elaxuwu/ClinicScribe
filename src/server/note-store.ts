@@ -260,7 +260,7 @@ export const parseClinicNote = (value: unknown) => {
 
 const makeTitle = (note: NoteJson, transcript: string) => {
   const source = note.visit_summary.trim() || transcript.trim() || "Clinic note";
-  const title = source.replace(/\s+/g, " ").slice(0, 90).trim();
+  const title = source.replace(/\s+/g, " ").trim();
 
   return title || "Clinic note";
 };

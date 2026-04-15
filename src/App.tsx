@@ -1859,6 +1859,10 @@ function App() {
         ? `Saved original ${originalNoteLanguage} note`
         : "Saved original note"
       : `${activeNoteLanguage} translation`;
+  const displayedNoteHeading =
+    getStringValue(noteResult?.visit_summary) ||
+    noteHeading ||
+    "Saved ClinicScribe note";
   const dashboardSearchTerm = dashboardSearch.trim().toLowerCase();
   const visibleSavedNotes = savedNotes
     .filter((savedNote) => {
@@ -1903,9 +1907,9 @@ function App() {
   const pageDescription =
     activeView === "dashboard"
       ? "Search and sort saved patient encounters."
-      : activeView === "note"
-        ? noteHeading || "Review the generated documentation."
-        : "Clinical notes faster, clearer, and ready for review.";
+      : activeView === "scribe"
+        ? "Clinical notes faster, clearer, and ready for review."
+        : "";
 
         //hi
 
@@ -1927,13 +1931,15 @@ function App() {
                     {pageTitle}
                   </h1>
                 )}
-                <p
-                  className={`${
-                    activeView === "scribe" ? "mt-3" : "mt-2"
-                  } text-sm text-zinc-500`}
-                >
-                  {pageDescription}
-                </p>
+                {pageDescription ? (
+                  <p
+                    className={`${
+                      activeView === "scribe" ? "mt-3" : "mt-2"
+                    } text-sm text-zinc-500`}
+                  >
+                    {pageDescription}
+                  </p>
+                ) : null}
               </div>
             </div>
 
@@ -2199,9 +2205,6 @@ function App() {
               <h2 className="text-xl font-semibold tracking-normal text-zinc-950">
                 Clinical note
               </h2>
-              <p className="mt-1 text-sm text-zinc-500">
-                {noteHeading || "Review the generated documentation."}
-              </p>
             </div>
 
             <button
@@ -2228,7 +2231,7 @@ function App() {
                       {activeNoteLabel}
                     </p>
                     <h3 className="mt-1 text-lg font-semibold text-zinc-950">
-                      {noteHeading || "Saved ClinicScribe note"}
+                      {displayedNoteHeading}
                     </h3>
                     {translationStatus ? (
                       <p className="mt-1 text-sm text-zinc-500">

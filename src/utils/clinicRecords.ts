@@ -178,7 +178,7 @@ const makeTitle = (
     getNoteString(noteJson, "title") ||
     getNoteString(noteJson, "visit_summary") ||
     transcript;
-  const title = titleSource.replace(/\s+/g, " ").slice(0, 120).trim();
+  const title = titleSource.replace(/\s+/g, " ").trim();
 
   return title || "Clinic note";
 };
