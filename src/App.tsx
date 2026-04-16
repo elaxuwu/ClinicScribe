@@ -1935,6 +1935,8 @@ function App() {
   );
   const [isDashboardFilterPanelOpen, setIsDashboardFilterPanelOpen] =
     useState(false);
+  const [isDashboardFilterPanelOpening, setIsDashboardFilterPanelOpening] =
+    useState(false);
   const [isDashboardFilterPanelClosing, setIsDashboardFilterPanelClosing] =
     useState(false);
   const [isPatientIdFilterOpen, setIsPatientIdFilterOpen] = useState(false);
@@ -1964,6 +1966,7 @@ function App() {
   const lastPatientRecordAutosaveSignatureRef = useRef("");
   const noteContentRef = useRef<HTMLDivElement | null>(null);
   const noteChatMessagesEndRef = useRef<HTMLDivElement | null>(null);
+  const dashboardFilterOpenFrameRef = useRef<number | null>(null);
   const dashboardFilterCloseTimerRef = useRef<number | null>(null);
   const isGuestMode = currentUser?.isGuest === true;
   const guestId = isGuestMode ? currentUser.id : "";
@@ -1972,6 +1975,10 @@ function App() {
     () => () => {
       if (dashboardFilterCloseTimerRef.current !== null) {
         window.clearTimeout(dashboardFilterCloseTimerRef.current);
+      }
+
+      if (dashboardFilterOpenFrameRef.current !== null) {
+        window.cancelAnimationFrame(dashboardFilterOpenFrameRef.current);
       }
     },
     [],
@@ -3819,7 +3826,13 @@ function App() {
 
     setIsPatientIdFilterOpen(false);
     setPatientIdFilterSearch("");
+    setIsDashboardFilterPanelOpening(false);
     setIsDashboardFilterPanelClosing(true);
+
+    if (dashboardFilterOpenFrameRef.current !== null) {
+      window.cancelAnimationFrame(dashboardFilterOpenFrameRef.current);
+      dashboardFilterOpenFrameRef.current = null;
+    }
 
     if (dashboardFilterCloseTimerRef.current !== null) {
       window.clearTimeout(dashboardFilterCloseTimerRef.current);
@@ -3838,13 +3851,21 @@ function App() {
     }
 
     setIsDashboardFilterPanelClosing(false);
+    setIsDashboardFilterPanelOpening(true);
     setIsDashboardFilterPanelOpen(true);
+
+    dashboardFilterOpenFrameRef.current = window.requestAnimationFrame(() => {
+      setIsDashboardFilterPanelOpening(false);
+      dashboardFilterOpenFrameRef.current = null;
+    });
   };
   const isDashboardFilterPanelVisible =
     isDashboardFilterPanelOpen || isDashboardFilterPanelClosing;
   const dashboardFilterMotionState = isDashboardFilterPanelClosing
     ? "closing"
-    : "open";
+    : isDashboardFilterPanelOpening
+      ? "opening"
+      : "open";
   const dashboardSearchTerm = dashboardSearch.trim().toLowerCase();
   const dashboardPatientIdOptions = getUniqueSortedValues(
     savedNotes.map((savedNote) => savedNote.patientId),
