@@ -128,6 +128,7 @@ type NoteChatMessage = {
 
 type EditNoteResponse = {
   message?: string;
+  changed?: boolean;
   result?: NoteResult;
   error?: string;
   details?: unknown;
@@ -1276,6 +1277,7 @@ function App() {
   const chunksRef = useRef<BlobPart[]>([]);
   const suppressNextAutosaveRef = useRef(false);
   const lastPatientRecordAutosaveSignatureRef = useRef("");
+  const noteContentRef = useRef<HTMLDivElement | null>(null);
   const noteChatMessagesEndRef = useRef<HTMLDivElement | null>(null);
   const isGuestMode = currentUser?.isGuest === true;
   const guestId = isGuestMode ? currentUser.id : "";
@@ -1316,12 +1318,22 @@ function App() {
     );
   };
 
-  const captureSelectedNoteText = () => {
-    const selectedText = window.getSelection()?.toString().trim() ?? "";
+  const updateSelectedNoteText = () => {
+    const selection = window.getSelection();
+    const selectedText = selection?.toString().trim() ?? "";
 
-    if (selectedText) {
-      setSelectedNoteText(selectedText.replace(/\s+/g, " ").slice(0, 8000));
+    if (
+      !selectedText ||
+      !selection?.anchorNode ||
+      !selection.focusNode ||
+      !noteContentRef.current?.contains(selection.anchorNode) ||
+      !noteContentRef.current.contains(selection.focusNode)
+    ) {
+      setSelectedNoteText("");
+      return;
     }
+
+    setSelectedNoteText(selectedText.replace(/\s+/g, " ").slice(0, 8000));
   };
 
   const enterGuestMode = () => {
@@ -1905,13 +1917,16 @@ function App() {
       const assistantMessage: NoteChatMessage = {
         id: createNoteChatMessageId(),
         role: "assistant",
-        content: responseJson.message || "Updated the note.",
+        content:
+          responseJson.message ||
+          "I'm here. Tell me what you'd like to review or change in this note.",
         createdAt: new Date().toISOString(),
       };
       const nextHistory = [
         ...historyWithUserMessage,
         assistantMessage,
       ].slice(-NOTE_CHAT_HISTORY_LIMIT);
+      const noteChanged = responseJson.changed !== false;
       const responseLanguages = getTranslationLanguages(responseJson.result);
       const editedNote: NoteResult = {
         ...source,
@@ -1932,18 +1947,31 @@ function App() {
         chat_history: nextHistory,
       };
 
-      setBaseNoteResult(editedNote);
-      setNoteResult(editedNote);
       setNoteChatMessages(nextHistory);
-      setCurrentNoteTitle(getStringValue(editedNote.title));
-      setPatientDraft(getPatientDraftFromNote(editedNote));
-      setActiveNoteLanguage("Original");
-      setSelectedTranslationLanguage("");
-      setTranslationStatus("ClinicScribe AI edited the original note.");
-      setSelectedNoteText("");
-      setPatientRecordStatus(
-        "ClinicScribe AI updated the note. Autosave will save it.",
-      );
+
+      if (noteChanged) {
+        setBaseNoteResult(editedNote);
+        setNoteResult(editedNote);
+        setCurrentNoteTitle(getStringValue(editedNote.title));
+        setPatientDraft(getPatientDraftFromNote(editedNote));
+        setActiveNoteLanguage("Original");
+        setSelectedTranslationLanguage("");
+        setTranslationStatus("ClinicScribe AI edited the original note.");
+        setSelectedNoteText("");
+        setPatientRecordStatus(
+          "ClinicScribe AI updated the note. Autosave will save it.",
+        );
+      } else {
+        setBaseNoteResult((current) => withNoteChatHistory(current, nextHistory));
+        setNoteResult((current) =>
+          activeNoteLanguage === "Original"
+            ? withNoteChatHistory(current, nextHistory)
+            : current,
+        );
+        setPatientRecordStatus(
+          "ClinicScribe AI replied. Autosave will save this chat.",
+        );
+      }
     } catch (editError) {
       setNoteChatError(
         editError instanceof Error
@@ -2812,6 +2840,17 @@ function App() {
     pendingRecordings.length > 0 ||
     currentNoteRecordings.length > 0 ||
     currentNoteTitle.trim().length > 0;
+  const hasCurrentNoteTranscript = currentNoteTranscript.trim().length > 0;
+  const noteSourceMaterialsLabel = [
+    hasCurrentNoteTranscript ? "Transcript" : "",
+    currentNoteRecordings.length > 0
+      ? `${currentNoteRecordings.length} recording${
+          currentNoteRecordings.length === 1 ? "" : "s"
+        }`
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" + ");
   const selectedLanguageLabel = selectedTranslationLanguage
     ? `Translate to ${selectedTranslationLanguage}`
     : "Choose language";
@@ -3257,8 +3296,9 @@ function App() {
           {noteResult ? (
             <div
               className="mt-6 space-y-6"
-              onKeyUp={captureSelectedNoteText}
-              onMouseUp={captureSelectedNoteText}
+              onKeyUp={updateSelectedNoteText}
+              onMouseUp={updateSelectedNoteText}
+              ref={noteContentRef}
             >
               <section className="rounded-2xl border border-zinc-200 p-5">
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -3482,51 +3522,64 @@ function App() {
 
               </section>
 
-              {currentNoteTranscript.trim() ? (
-                <section className="rounded-2xl border border-zinc-200 p-5">
-                  <h3 className="text-lg font-semibold text-zinc-950">
-                    Saved transcript
-                  </h3>
-                  <p className="mt-3 whitespace-pre-wrap rounded-xl bg-zinc-50 p-4 text-sm leading-6 text-zinc-700">
-                    {currentNoteTranscript}
-                  </p>
-                </section>
-              ) : null}
+              {hasCurrentNoteTranscript || currentNoteRecordings.length > 0 ? (
+                <details className="group rounded-2xl border border-zinc-200 p-5">
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-4 text-lg font-semibold text-zinc-950 marker:hidden">
+                    <span>Transcript and recordings</span>
+                    <span className="text-sm font-medium text-zinc-500">
+                      {noteSourceMaterialsLabel}
+                    </span>
+                  </summary>
 
-              {currentNoteRecordings.length > 0 ? (
-                <section className="rounded-2xl border border-zinc-200 p-5">
-                  <h3 className="text-lg font-semibold text-zinc-950">
-                    Recorded audio
-                  </h3>
-                  <div className="mt-4 space-y-3">
-                    {currentNoteRecordings.map((recording, index) => (
-                      <div
-                        className="rounded-xl border border-zinc-200 bg-zinc-50 p-3"
-                        key={recording.id}
-                      >
-                        <p className="text-sm font-semibold text-zinc-900">
-                          Recording {index + 1}
+                  <div className="mt-5 space-y-5 border-t border-zinc-200 pt-5">
+                    {hasCurrentNoteTranscript ? (
+                      <div>
+                        <h3 className="text-sm font-semibold text-zinc-900">
+                          Saved transcript
+                        </h3>
+                        <p className="mt-3 whitespace-pre-wrap rounded-lg bg-zinc-50 p-4 text-sm leading-6 text-zinc-700">
+                          {currentNoteTranscript}
                         </p>
-                        <p className="mt-1 text-xs text-zinc-500">
-                          {formatDate(recording.createdAt)} -{" "}
-                          {Math.max(1, Math.round(recording.size / 1024))} KB
-                        </p>
-                        {recording.dataUrl ? (
-                          <audio
-                            className="mt-3 w-full"
-                            controls
-                            preload="metadata"
-                            src={recording.dataUrl}
-                          />
-                        ) : (
-                          <p className="mt-3 text-sm text-zinc-500">
-                            Audio file saved without an inline preview.
-                          </p>
-                        )}
                       </div>
-                    ))}
+                    ) : null}
+
+                    {currentNoteRecordings.length > 0 ? (
+                      <div>
+                        <h3 className="text-sm font-semibold text-zinc-900">
+                          Recorded audio
+                        </h3>
+                        <div className="mt-3 space-y-3">
+                          {currentNoteRecordings.map((recording, index) => (
+                            <div
+                              className="rounded-lg border border-zinc-200 bg-zinc-50 p-3"
+                              key={recording.id}
+                            >
+                              <p className="text-sm font-semibold text-zinc-900">
+                                Recording {index + 1}
+                              </p>
+                              <p className="mt-1 text-xs text-zinc-500">
+                                {formatDate(recording.createdAt)} -{" "}
+                                {Math.max(1, Math.round(recording.size / 1024))} KB
+                              </p>
+                              {recording.dataUrl ? (
+                                <audio
+                                  className="mt-3 w-full"
+                                  controls
+                                  preload="metadata"
+                                  src={recording.dataUrl}
+                                />
+                              ) : (
+                                <p className="mt-3 text-sm text-zinc-500">
+                                  Audio file saved without an inline preview.
+                                </p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
-                </section>
+                </details>
               ) : null}
 
               <section className="rounded-2xl border border-zinc-200 p-5">
@@ -3609,15 +3662,22 @@ function App() {
 
       {activeView === "note" && noteResult ? (
         <>
-          {isNoteChatOpen ? (
-            <aside className="fixed bottom-20 left-4 z-30 flex max-h-[70vh] w-[calc(100vw-2rem)] max-w-md flex-col rounded-2xl border border-zinc-200 bg-white shadow-xl sm:left-6">
+          <aside
+            aria-hidden={!isNoteChatOpen}
+            inert={!isNoteChatOpen ? true : undefined}
+            className={`fixed bottom-20 left-4 z-30 flex h-[min(82vh,44rem)] max-h-[calc(100vh-6rem)] w-[calc(100vw-2rem)] max-w-lg origin-bottom-left flex-col rounded-2xl border border-zinc-200 bg-white shadow-xl transition-all duration-200 ease-out motion-reduce:transform-none motion-reduce:transition-none sm:left-6 ${
+              isNoteChatOpen
+                ? "translate-y-0 scale-100 opacity-100"
+                : "pointer-events-none translate-y-4 scale-95 opacity-0"
+            }`}
+          >
               <div className="flex items-start justify-between gap-3 border-b border-zinc-200 px-4 py-3">
                 <div>
                   <p className="text-sm font-semibold text-zinc-950">
                     ClinicScribe AI
                   </p>
                   <p className="mt-1 text-xs text-zinc-500">
-                    Ask for edits. Highlight note text first to target a section.
+                    Ask questions or request edits. Highlight note text to target a section.
                   </p>
                 </div>
                 <div className="flex shrink-0 gap-2">
@@ -3639,7 +3699,7 @@ function App() {
                 </div>
               </div>
 
-              <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4">
                 {noteChatMessages.length > 0 ? (
                   noteChatMessages.map((message) => (
                     <div
@@ -3666,8 +3726,7 @@ function App() {
                   ))
                 ) : (
                   <div className="rounded-xl bg-zinc-50 px-3 py-3 text-sm leading-6 text-zinc-500">
-                    Try: "Make the plan more concise" or highlight one sentence
-                    and ask me to rewrite it.
+                    Try: "What should I check next?" or highlight one sentence and ask me to rewrite it.
                   </div>
                 )}
 
@@ -3677,26 +3736,6 @@ function App() {
                 <div ref={noteChatMessagesEndRef} />
               </div>
 
-              {selectedNoteText ? (
-                <div className="border-t border-zinc-200 px-4 py-3">
-                  <div className="rounded-xl bg-zinc-50 px-3 py-2 text-xs leading-5 text-zinc-600">
-                    <div className="flex items-center justify-between gap-3">
-                      <p className="font-semibold text-zinc-800">
-                        Selected note text
-                      </p>
-                      <button
-                        className="text-xs font-semibold text-zinc-600 underline-offset-2 hover:underline"
-                        onClick={() => setSelectedNoteText("")}
-                        type="button"
-                      >
-                        Clear
-                      </button>
-                    </div>
-                    <p className="mt-1 line-clamp-3">{selectedNoteText}</p>
-                  </div>
-                </div>
-              ) : null}
-
               {noteChatError ? (
                 <div className="border-t border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
                   {noteChatError}
@@ -3704,7 +3743,7 @@ function App() {
               ) : null}
 
               <form
-                className="border-t border-zinc-200 p-4"
+                className="border-t border-zinc-200 p-3"
                 onSubmit={(event) => {
                   event.preventDefault();
                   void sendNoteChatMessage();
@@ -3713,20 +3752,30 @@ function App() {
                 <label className="sr-only" htmlFor="note-chat-message">
                   Message ClinicScribe AI
                 </label>
-                <textarea
-                  className="max-h-36 min-h-24 w-full resize-y rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-950 outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100 disabled:cursor-not-allowed disabled:text-zinc-400"
-                  disabled={isEditingNoteWithAi}
-                  id="note-chat-message"
-                  onChange={(event) => setNoteChatInput(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
-                      event.preventDefault();
-                      void sendNoteChatMessage();
-                    }
-                  }}
-                  placeholder="Tell ClinicScribe AI what to change..."
-                  value={noteChatInput}
-                />
+                <div className="rounded-lg border border-zinc-200 bg-zinc-50 transition focus-within:border-zinc-400 focus-within:bg-white focus-within:ring-4 focus-within:ring-zinc-100">
+                  {selectedNoteText ? (
+                    <div className="border-b border-zinc-200 px-3 py-2 text-xs leading-5 text-zinc-600">
+                      <p className="font-semibold text-zinc-800">
+                        Selected note text
+                      </p>
+                      <p className="mt-1 line-clamp-2">{selectedNoteText}</p>
+                    </div>
+                  ) : null}
+                  <textarea
+                    className="max-h-28 min-h-16 w-full resize-none bg-transparent px-3 py-3 text-sm text-zinc-950 outline-none disabled:cursor-not-allowed disabled:text-zinc-400"
+                    disabled={isEditingNoteWithAi}
+                    id="note-chat-message"
+                    onChange={(event) => setNoteChatInput(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.shiftKey) {
+                        event.preventDefault();
+                        void sendNoteChatMessage();
+                      }
+                    }}
+                    placeholder="Ask or tell ClinicScribe AI what to change..."
+                    value={noteChatInput}
+                  />
+                </div>
                 <div className="mt-3 flex items-center justify-between gap-3">
                   <p className="text-xs text-zinc-500">
                     Enter sends. Shift+Enter adds a line.
@@ -3742,8 +3791,7 @@ function App() {
                   </button>
                 </div>
               </form>
-            </aside>
-          ) : null}
+          </aside>
 
           <button
             aria-label="Open ClinicScribe AI chat"

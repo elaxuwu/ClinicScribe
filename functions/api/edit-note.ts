@@ -38,12 +38,14 @@ const MAX_MESSAGE_CHARS = 5000;
 const MAX_SELECTED_TEXT_CHARS = 8000;
 const MAX_CHAT_HISTORY_MESSAGES = 12;
 
-const EDIT_SYSTEM_PROMPT = `You are ClinicScribe AI, a clinical note editing assistant.
-Edit the supplied clinical note JSON according to the clinician's request.
+const EDIT_SYSTEM_PROMPT = `You are ClinicScribe AI, a friendly clinical note assistant for clinicians.
+You can both chat about the note and edit the supplied clinical note JSON.
+If the clinician asks a greeting, question, explanation, or other conversational request, answer naturally in assistant_message and return the note unchanged.
+If the clinician asks for an edit, update the relevant part of the note and briefly explain what changed in assistant_message.
 The clinician may ask you to edit any part of the note, including patient metadata, SOAP, extracted data, discharge instructions, visit summary, and title.
 Treat direct user edits as clinician-provided information, but do not invent medical facts beyond the current note or the user's request.
-If selected_text is provided, focus the edit on that exact excerpt while keeping the whole note consistent.
-Return the full updated note object, not a diff or patch.
+If selected_text is provided and an edit is requested, focus the edit on that exact excerpt while keeping the whole note consistent.
+Return the full note object, not a diff or patch.
 Preserve arrays as arrays and preserve the same JSON schema.
 Use empty strings for unknown text fields and null for unknown patient age.
 Return valid JSON only.
@@ -52,7 +54,8 @@ Start the response with { and end it with }.
 
 Return exactly this top-level shape:
 {
-  "assistant_message": "briefly explain what changed",
+  "assistant_message": "natural reply to the clinician",
+  "changed": false,
   "note": {
     "title": "string",
     "language_detected": "string",
@@ -375,6 +378,30 @@ const normalizeNoteJson = (value: unknown, providerUsed: ProviderUsed): NoteJson
   };
 };
 
+const getComparableNotePayload = (
+  value: unknown,
+  providerUsed: ProviderUsed,
+) => {
+  const source = asRecord(value) ?? {};
+  const { provider_used: _providerUsed, ...noteJson } = normalizeNoteJson(
+    value,
+    providerUsed,
+  );
+
+  return {
+    title: toStringValue(source.title).trim(),
+    ...noteJson,
+  };
+};
+
+const hasNoteChanged = (
+  sourceNote: Record<string, unknown>,
+  modelNote: Record<string, unknown>,
+  providerUsed: ProviderUsed,
+) =>
+  JSON.stringify(getComparableNotePayload(sourceNote, providerUsed)) !==
+  JSON.stringify(getComparableNotePayload(modelNote, providerUsed));
+
 const normalizeHistoryMessages = (value: unknown): ChatMessage[] =>
   Array.isArray(value)
     ? value
@@ -403,7 +430,8 @@ const createEditMessages = (
   {
     role: "user",
     content: [
-      "Edit this current clinical note JSON.",
+      "Work with this current clinical note JSON.",
+      "Chat if the request is conversational. Edit only when the clinician asks for a note change.",
       "Return only the required JSON shape.",
       "",
       "current_note_json:",
@@ -452,10 +480,16 @@ const extractEditResult = (
 
   const assistantMessage = toStringValue(parsed.assistant_message).trim();
   const normalizedNote = normalizeNoteJson(modelNote, providerUsed);
+  const changed = hasNoteChanged(sourceNote, modelNote, providerUsed);
   const now = new Date().toISOString();
 
   return {
-    message: assistantMessage || "Updated the note.",
+    message:
+      assistantMessage ||
+      (changed
+        ? "Done. I updated the note."
+        : "I'm here. Tell me what you'd like to review or change in this note."),
+    changed,
     result: {
       ...normalizedNote,
       note_id: sourceNote.note_id,
