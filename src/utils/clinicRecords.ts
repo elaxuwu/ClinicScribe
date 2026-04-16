@@ -1,6 +1,8 @@
 import { supabase } from "./supabase";
 
 export type PatientDraft = {
+  patientProfileId?: string;
+  patientId: string;
   name: string;
   age: string;
   gender: string;
@@ -14,6 +16,8 @@ export type EncounterSummary = {
   title: string;
   createdAt: string;
   updatedAt: string;
+  patientProfileId?: string;
+  patientId?: string;
   patientName: string;
   patientAge?: number;
   patientGender?: string;
@@ -32,6 +36,16 @@ export type EncounterDetail = EncounterSummary & {
   result: Record<string, unknown>;
 };
 
+export type PatientProfile = {
+  profileId: string;
+  patientId?: string;
+  name: string;
+  age?: number;
+  gender?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type CurrentSupabaseUser = {
   id: string;
 };
@@ -40,8 +54,11 @@ type PatientRow = {
   id: string;
   name: string;
   name_key: string;
+  patient_identifier: string | null;
   age: number | null;
   gender: string | null;
+  created_at: string | null;
+  updated_at: string | null;
 };
 
 type EncounterRow = {
@@ -154,8 +171,30 @@ const getRelatedPatient = (value: unknown): PatientRow | null => {
       typeof record.name_key === "string"
         ? record.name_key
         : normalizeNameKey(record.name),
+    patient_identifier:
+      typeof record.patient_identifier === "string"
+        ? record.patient_identifier
+        : null,
     age: typeof record.age === "number" ? record.age : null,
     gender: typeof record.gender === "string" ? record.gender : null,
+    created_at:
+      typeof record.created_at === "string" ? record.created_at : null,
+    updated_at:
+      typeof record.updated_at === "string" ? record.updated_at : null,
+  };
+};
+
+const mapPatientProfile = (patient: PatientRow): PatientProfile => {
+  const now = new Date().toISOString();
+
+  return {
+    profileId: patient.id,
+    patientId: patient.patient_identifier ?? undefined,
+    name: patient.name,
+    age: patient.age ?? undefined,
+    gender: patient.gender ?? undefined,
+    createdAt: patient.created_at ?? now,
+    updatedAt: patient.updated_at ?? patient.created_at ?? now,
   };
 };
 
@@ -194,6 +233,8 @@ const mapEncounterSummary = (row: EncounterRow): EncounterSummary => {
     title: row.title || makeTitle(noteJson, row.transcript ?? ""),
     createdAt: row.created_at ?? now,
     updatedAt: row.updated_at ?? row.created_at ?? now,
+    patientProfileId: patient?.id,
+    patientId: patient?.patient_identifier ?? undefined,
     patientName: patient?.name ?? UNKNOWN_PATIENT,
     patientAge: patient?.age ?? undefined,
     patientGender: patient?.gender ?? undefined,
@@ -229,8 +270,11 @@ const selectEncounterColumns = [
   "pinned_at",
   "created_at",
   "updated_at",
-  "patient:patients(id,name,name_key,age,gender)",
+  "patient:patients(id,name,name_key,patient_identifier,age,gender,created_at,updated_at)",
 ].join(",");
+
+const selectPatientColumns =
+  "id,name,name_key,patient_identifier,age,gender,created_at,updated_at";
 
 const upsertPatient = async (
   userId: string,
@@ -238,29 +282,60 @@ const upsertPatient = async (
 ): Promise<PatientRow> => {
   const name = normalizeName(patientDraft.name);
   const nameKey = normalizeNameKey(name);
+  const patientId = patientDraft.patientId.trim() || null;
   const age = parseAge(patientDraft.age);
   const gender = patientDraft.gender.trim() || null;
 
-  const { data: existingPatient, error: lookupError } = await supabase
+  const { data: selectedPatient, error: selectedPatientError } =
+    patientDraft.patientProfileId
+      ? await supabase
+          .from("patients")
+          .select(selectPatientColumns)
+          .eq("user_id", userId)
+          .eq("id", patientDraft.patientProfileId)
+          .maybeSingle()
+      : { data: null, error: null };
+
+  throwIfSupabaseError(selectedPatientError, "Unable to find selected patient");
+
+  const lookupQuery = supabase
     .from("patients")
-    .select("id,name,name_key,age,gender")
-    .eq("user_id", userId)
-    .eq("name_key", nameKey)
-    .maybeSingle();
+    .select(selectPatientColumns)
+    .eq("user_id", userId);
+  const { data: existingPatient, error: lookupError } = selectedPatient
+    ? { data: selectedPatient, error: null }
+    : patientId
+      ? await lookupQuery.eq("patient_identifier", patientId).maybeSingle()
+      : await lookupQuery.eq("name_key", nameKey).maybeSingle();
 
   throwIfSupabaseError(lookupError, "Unable to find existing patient");
 
-  if (existingPatient) {
+  const { data: existingNamedPatient, error: nameLookupError } =
+    patientId && !existingPatient
+      ? await supabase
+          .from("patients")
+          .select(selectPatientColumns)
+          .eq("user_id", userId)
+          .eq("name_key", nameKey)
+          .maybeSingle()
+      : { data: null, error: null };
+
+  throwIfSupabaseError(nameLookupError, "Unable to find existing patient");
+
+  const patientToUpdate = existingPatient ?? existingNamedPatient;
+
+  if (patientToUpdate) {
     const { data, error } = await supabase
       .from("patients")
       .update({
         name,
-        age: age ?? existingPatient.age,
-        gender: gender ?? existingPatient.gender,
+        patient_identifier: patientId ?? patientToUpdate.patient_identifier,
+        age: age ?? patientToUpdate.age,
+        gender: gender ?? patientToUpdate.gender,
         updated_at: new Date().toISOString(),
       })
-      .eq("id", existingPatient.id)
-      .select("id,name,name_key,age,gender")
+      .eq("id", patientToUpdate.id)
+      .select(selectPatientColumns)
       .single();
 
     throwIfSupabaseError(error, "Unable to update patient");
@@ -274,10 +349,11 @@ const upsertPatient = async (
       user_id: userId,
       name,
       name_key: nameKey,
+      patient_identifier: patientId,
       age,
       gender,
     })
-    .select("id,name,name_key,age,gender")
+    .select(selectPatientColumns)
     .single();
 
   throwIfSupabaseError(error, "Unable to create patient");
@@ -312,6 +388,35 @@ export const listEncounterSummaries = async () => {
 export const getEncounterDetail = async (encounterId: string) =>
   mapEncounterDetail(await getEncounterById(encounterId));
 
+export const listPatientProfiles = async () => {
+  const user = await getCurrentUser();
+  const { data, error } = await supabase
+    .from("patients")
+    .select(selectPatientColumns)
+    .eq("user_id", user.id)
+    .order("updated_at", { ascending: false });
+
+  throwIfSupabaseError(error, "Unable to load patient profiles");
+
+  return ((data ?? []) as PatientRow[]).map(mapPatientProfile);
+};
+
+export const savePatientProfile = async (
+  patientDraft: Pick<
+    PatientDraft,
+    "patientProfileId" | "patientId" | "name" | "age" | "gender"
+  >,
+) => {
+  const user = await getCurrentUser();
+  const patient = await upsertPatient(user.id, {
+    ...patientDraft,
+    visitDate: "",
+    diagnosis: "",
+  });
+
+  return mapPatientProfile(patient);
+};
+
 export const saveEncounterRecord = async (input: {
   encounterId?: string;
   patientDraft: PatientDraft;
@@ -343,6 +448,9 @@ export const saveEncounterRecord = async (input: {
       ...noteJson,
       patient: {
         ...patientMetadata,
+        patient_profile_id: patient.id,
+        patient_id: patient.patient_identifier ?? "",
+        patient_identifier: patient.patient_identifier ?? "",
         name: patient.name,
         age: patient.age,
         gender: patient.gender ?? "",

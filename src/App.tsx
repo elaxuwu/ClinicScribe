@@ -3,11 +3,14 @@ import { type FormEvent, useEffect, useRef, useState } from "react";
 import {
   deleteEncounterRecord,
   getEncounterDetail,
+  listPatientProfiles,
   listEncounterSummaries,
   saveEncounterRecord,
+  savePatientProfile,
   updateEncounterSummary,
   type EncounterSummary,
   type PatientDraft,
+  type PatientProfile,
 } from "./utils/clinicRecords";
 import { supabase } from "./utils/supabase";
 
@@ -38,6 +41,9 @@ type NoteResult = {
   language_detected?: unknown;
   provider_used?: unknown;
   patient?: {
+    patient_profile_id?: unknown;
+    patient_id?: unknown;
+    patient_identifier?: unknown;
     name?: unknown;
     age?: unknown;
     gender?: unknown;
@@ -75,7 +81,7 @@ type CurrentUser = {
 
 type AuthMode = "login" | "signup";
 
-type AppView = "scribe" | "dashboard" | "note";
+type AppView = "scribe" | "dashboard" | "note" | "patient";
 
 type SavedNoteSummary = {
   id: string;
@@ -83,6 +89,8 @@ type SavedNoteSummary = {
   title: string;
   createdAt: string;
   updatedAt: string;
+  patientProfileId?: string;
+  patientId?: string;
   patientName?: string;
   patientAge?: number;
   patientGender?: string;
@@ -134,12 +142,23 @@ type EditNoteResponse = {
   details?: unknown;
 };
 
-type DashboardSort = "newest" | "patient" | "diagnosis";
+type DashboardSort = "newest" | "oldest" | "patient";
+type DashboardFilters = {
+  patientNames: string[];
+  patientIds: string[];
+  genders: string[];
+  ageMin: string;
+  ageMax: string;
+  diagnosis: string;
+  visitDateFrom: string;
+  visitDateTo: string;
+};
 type IconName =
   | "trash"
   | "pen"
   | "pin"
   | "pinOff"
+  | "filter"
   | "refresh"
   | "mic"
   | "stop"
@@ -175,16 +194,32 @@ const BRAND_LOGO_SRC = "/brand/logo.png?v=2";
 const GUEST_SESSION_KEY = "clinicscribe.guest.active";
 const GUEST_ID_KEY = "clinicscribe.guest.id";
 const GUEST_RECORDS_PREFIX = "clinicscribe.guest.records";
+const GUEST_PATIENT_PROFILES_PREFIX = "clinicscribe.guest.patients";
 const GUEST_SYNC_SOURCE_KEY = "clinicscribe.guest.syncSourceId";
+const EMPTY_DASHBOARD_FILTERS: DashboardFilters = {
+  patientNames: [],
+  patientIds: [],
+  genders: [],
+  ageMin: "",
+  ageMax: "",
+  diagnosis: "",
+  visitDateFrom: "",
+  visitDateTo: "",
+};
 
 const VIEW_PATHS: Record<AppView, string> = {
   scribe: "/",
   dashboard: "/dashboard",
   note: "/note",
+  patient: "/patients",
 };
 
 const getViewFromPathname = (pathname: string): AppView => {
   const normalizedPath = pathname.replace(/\/+$/, "") || "/";
+
+  if (normalizedPath.startsWith(`${VIEW_PATHS.patient}/`)) {
+    return "patient";
+  }
 
   if (normalizedPath === VIEW_PATHS.dashboard) {
     return "dashboard";
@@ -200,6 +235,18 @@ const getViewFromPathname = (pathname: string): AppView => {
 const getAutosaveKey = (userId: string) => `clinicscribe.autosave.${userId}`;
 const getGuestRecordsKey = (guestId: string) =>
   `${GUEST_RECORDS_PREFIX}.${guestId}`;
+const getGuestPatientProfilesKey = (guestId: string) =>
+  `${GUEST_PATIENT_PROFILES_PREFIX}.${guestId}`;
+const getPatientProfilePath = (profileId: string) =>
+  `${VIEW_PATHS.patient}/${encodeURIComponent(profileId)}`;
+const getPatientProfileIdFromPathname = (pathname: string) => {
+  const normalizedPath = pathname.replace(/\/+$/, "");
+  const prefix = `${VIEW_PATHS.patient}/`;
+
+  return normalizedPath.startsWith(prefix)
+    ? decodeURIComponent(normalizedPath.slice(prefix.length))
+    : "";
+};
 
 const clearAutosavedDraft = (user: CurrentUser | null) => {
   if (!user) {
@@ -313,6 +360,14 @@ const Icon = ({ name }: { name: IconName }) => {
           <path d="M8 17l1-8-3-3V4h4" />
           <path d="M14 4h4v2l-2.1 2.1" />
           <path d="M3 3l18 18" />
+        </svg>
+      );
+    case "filter":
+      return (
+        <svg {...commonProps} aria-hidden="true">
+          <path d="M4 5h16" />
+          <path d="M7 12h10" />
+          <path d="M10 19h4" />
         </svg>
       );
     case "refresh":
@@ -433,8 +488,132 @@ const sortSavedNotes = (notes: SavedNoteSummary[]) =>
       return left.pinned ? -1 : 1;
     }
 
-    return Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
+    return getSavedNoteVisitTime(right) - getSavedNoteVisitTime(left);
   });
+
+const getTimestamp = (value?: string) => {
+  if (!value) {
+    return 0;
+  }
+
+  const timestamp = Date.parse(value);
+
+  return Number.isNaN(timestamp) ? 0 : timestamp;
+};
+
+const getSavedNoteVisitTime = (note: SavedNoteSummary) =>
+  getTimestamp(note.visitDate) || getTimestamp(note.createdAt);
+
+const normalizeFilterKey = (value?: string) =>
+  (value ?? "").trim().toLowerCase();
+
+const getUniqueSortedValues = (values: Array<string | undefined>) => {
+  const options = new Map<string, string>();
+
+  values.forEach((value) => {
+    const trimmedValue = value?.trim();
+
+    if (!trimmedValue) {
+      return;
+    }
+
+    const key = normalizeFilterKey(trimmedValue);
+
+    if (!options.has(key)) {
+      options.set(key, trimmedValue);
+    }
+  });
+
+  return [...options.values()].sort((left, right) => left.localeCompare(right));
+};
+
+const selectionIncludes = (selectedValues: string[], value?: string) => {
+  if (selectedValues.length === 0) {
+    return true;
+  }
+
+  const key = normalizeFilterKey(value);
+
+  return (
+    Boolean(key) &&
+    selectedValues.some((selected) => normalizeFilterKey(selected) === key)
+  );
+};
+
+const parseFilterNumber = (value: string) => {
+  const parsedValue = Number.parseInt(value, 10);
+
+  return Number.isFinite(parsedValue) ? parsedValue : undefined;
+};
+
+const getActiveDashboardFilterCount = (filters: DashboardFilters) =>
+  [
+    filters.patientNames.length > 0,
+    filters.patientIds.length > 0,
+    filters.genders.length > 0,
+    Boolean(filters.ageMin.trim() || filters.ageMax.trim()),
+    Boolean(filters.diagnosis.trim()),
+    Boolean(filters.visitDateFrom || filters.visitDateTo),
+  ].filter(Boolean).length;
+
+const toggleFilterValue = (values: string[], value: string) =>
+  values.some(
+    (selected) => normalizeFilterKey(selected) === normalizeFilterKey(value),
+  )
+    ? values.filter(
+        (selected) => normalizeFilterKey(selected) !== normalizeFilterKey(value),
+      )
+    : [...values, value];
+
+const formatPatientProfileLabel = (profile: PatientProfile) =>
+  [
+    profile.name,
+    profile.age === undefined ? "" : `Age ${profile.age}`,
+    profile.patientId ? `ID ${profile.patientId}` : "",
+    profile.gender ?? "",
+  ]
+    .filter(Boolean)
+    .join(" - ");
+
+const getPatientProfileDraftPatch = (
+  profile: PatientProfile,
+): Pick<PatientDraft, "patientProfileId" | "patientId" | "name" | "age" | "gender"> => ({
+  patientProfileId: profile.profileId,
+  patientId: profile.patientId ?? "",
+  name: profile.name,
+  age: profile.age === undefined ? "" : String(profile.age),
+  gender: profile.gender ?? "",
+});
+
+const savedNoteMatchesPatientProfile = (
+  savedNote: SavedNoteSummary,
+  profile: PatientProfile,
+) => {
+  if (savedNote.patientProfileId && savedNote.patientProfileId === profile.profileId) {
+    return true;
+  }
+
+  if (
+    savedNote.patientId &&
+    profile.patientId &&
+    normalizeFilterKey(savedNote.patientId) === normalizeFilterKey(profile.patientId)
+  ) {
+    return true;
+  }
+
+  return (
+    normalizePatientProfileKey(savedNote.patientName ?? "") ===
+    normalizePatientProfileKey(profile.name)
+  );
+};
+
+const upsertPatientProfileList = (
+  profiles: PatientProfile[],
+  profile: PatientProfile,
+) =>
+  [profile, ...profiles.filter((existing) => existing.profileId !== profile.profileId)].sort(
+    (left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt),
+  );
 
 const getSupportedMimeType = () => {
   const types = [
@@ -642,6 +821,10 @@ const getPatientDraftFromNote = (note: NoteResult | null): PatientDraft => {
   const soap = asRecord(note?.soap) ?? {};
 
   return {
+    patientProfileId: getStringValue(patient.patient_profile_id) || undefined,
+    patientId:
+      getStringValue(patient.patient_id) ||
+      getStringValue(patient.patient_identifier),
     name: getStringValue(patient.name),
     age: getAgeInputValue(patient.age),
     gender: getStringValue(patient.gender),
@@ -752,6 +935,8 @@ const toSavedNoteSummary = (encounter: EncounterSummary): SavedNoteSummary => ({
   title: encounter.title,
   createdAt: encounter.createdAt,
   updatedAt: encounter.updatedAt,
+  patientProfileId: encounter.patientProfileId,
+  patientId: encounter.patientId,
   patientName: encounter.patientName,
   patientAge: encounter.patientAge,
   patientGender: encounter.patientGender,
@@ -795,6 +980,11 @@ const toGuestEncounterRecord = (value: unknown): GuestEncounterRecord | null => 
     title: record.title,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
+    patientProfileId:
+      typeof record.patientProfileId === "string"
+        ? record.patientProfileId
+        : undefined,
+    patientId: typeof record.patientId === "string" ? record.patientId : undefined,
     patientName: record.patientName,
     patientAge: typeof record.patientAge === "number" ? record.patientAge : undefined,
     patientGender:
@@ -854,6 +1044,104 @@ const parsePatientAge = (age: string) => {
 const normalizePatientName = (name: string) =>
   name.replace(/\s+/g, " ").trim() || "Unknown patient";
 
+const normalizePatientProfileKey = (name: string) =>
+  normalizePatientName(name).toLowerCase();
+
+const toGuestPatientProfile = (value: unknown): PatientProfile | null => {
+  const record = asRecord(value);
+
+  if (
+    !record ||
+    typeof record.profileId !== "string" ||
+    typeof record.name !== "string" ||
+    typeof record.createdAt !== "string" ||
+    typeof record.updatedAt !== "string"
+  ) {
+    return null;
+  }
+
+  return {
+    profileId: record.profileId,
+    patientId: typeof record.patientId === "string" ? record.patientId : undefined,
+    name: record.name,
+    age: typeof record.age === "number" ? record.age : undefined,
+    gender: typeof record.gender === "string" ? record.gender : undefined,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+};
+
+const readGuestPatientProfiles = (guestId: string): PatientProfile[] => {
+  try {
+    const rawProfiles = localStorage.getItem(getGuestPatientProfilesKey(guestId));
+
+    if (!rawProfiles) {
+      return [];
+    }
+
+    const parsedProfiles = JSON.parse(rawProfiles) as unknown;
+
+    return Array.isArray(parsedProfiles)
+      ? parsedProfiles
+          .map(toGuestPatientProfile)
+          .filter((profile): profile is PatientProfile => profile !== null)
+      : [];
+  } catch {
+    return [];
+  }
+};
+
+const writeGuestPatientProfiles = (
+  guestId: string,
+  profiles: PatientProfile[],
+) => {
+  localStorage.setItem(getGuestPatientProfilesKey(guestId), JSON.stringify(profiles));
+};
+
+const upsertGuestPatientProfile = (
+  guestId: string,
+  patientDraft: Pick<
+    PatientDraft,
+    "patientProfileId" | "patientId" | "name" | "age" | "gender"
+  >,
+) => {
+  const profiles = readGuestPatientProfiles(guestId);
+  const patientId = patientDraft.patientId.trim() || undefined;
+  const patientName = normalizePatientName(patientDraft.name);
+  const patientAge = parsePatientAge(patientDraft.age);
+  const patientGender = patientDraft.gender.trim() || undefined;
+  const existingProfile =
+    (patientDraft.patientProfileId
+      ? profiles.find((profile) => profile.profileId === patientDraft.patientProfileId)
+      : undefined) ??
+    (patientId
+      ? profiles.find(
+          (profile) =>
+            normalizeFilterKey(profile.patientId) === normalizeFilterKey(patientId),
+        )
+      : undefined) ??
+    profiles.find(
+      (profile) =>
+        normalizePatientProfileKey(profile.name) ===
+        normalizePatientProfileKey(patientName),
+    );
+  const now = new Date().toISOString();
+  const profile: PatientProfile = {
+    profileId: existingProfile?.profileId ?? `guest_patient_${crypto.randomUUID()}`,
+    patientId: patientId ?? existingProfile?.patientId,
+    name: patientName,
+    age: patientAge ?? existingProfile?.age,
+    gender: patientGender ?? existingProfile?.gender,
+    createdAt: existingProfile?.createdAt ?? now,
+    updatedAt: now,
+  };
+  const nextProfiles = upsertPatientProfileList(profiles, profile);
+
+  writeGuestPatientProfiles(guestId, nextProfiles);
+
+  return profile;
+};
+
 const getVisitDateTimestamp = (visitDate: string) => {
   const trimmedDate = visitDate.trim();
 
@@ -910,9 +1198,11 @@ const saveGuestEncounterRecord = (
   const patientMetadata = asRecord(noteJson.patient) ?? {};
   const encounterMetadata = asRecord(noteJson.encounter) ?? {};
   const soap = asRecord(noteJson.soap) ?? {};
-  const patientName = normalizePatientName(input.patientDraft.name);
-  const patientAge = parsePatientAge(input.patientDraft.age);
-  const patientGender = input.patientDraft.gender.trim() || undefined;
+  const patientProfile = upsertGuestPatientProfile(guestId, input.patientDraft);
+  const patientName = patientProfile.name;
+  const patientId = patientProfile.patientId;
+  const patientAge = patientProfile.age;
+  const patientGender = patientProfile.gender;
   const diagnosis =
     input.patientDraft.diagnosis.trim() ||
     getStringValue(encounterMetadata.diagnosis) ||
@@ -932,6 +1222,9 @@ const saveGuestEncounterRecord = (
     pinned_at: existingRecord?.pinnedAt,
     patient: {
       ...patientMetadata,
+      patient_profile_id: patientProfile.profileId,
+      patient_id: patientId ?? "",
+      patient_identifier: patientId ?? "",
       name: patientName,
       age: patientAge ?? null,
       gender: patientGender ?? "",
@@ -948,6 +1241,8 @@ const saveGuestEncounterRecord = (
     title,
     createdAt: existingRecord?.createdAt ?? now,
     updatedAt: now,
+    patientProfileId: patientProfile.profileId,
+    patientId,
     patientName,
     patientAge,
     patientGender,
@@ -1028,15 +1323,26 @@ const deleteGuestEncounterRecord = (guestId: string, encounterId: string) => {
 
 const syncGuestRecordsToAccount = async (guestId: string) => {
   const records = readGuestEncounterRecords(guestId);
+  const profiles = readGuestPatientProfiles(guestId);
 
-  if (records.length === 0) {
+  if (records.length === 0 && profiles.length === 0) {
     clearPendingGuestSync();
     return 0;
+  }
+
+  for (const profile of profiles) {
+    await savePatientProfile({
+      patientId: profile.patientId ?? "",
+      name: profile.name,
+      age: profile.age === undefined ? "" : String(profile.age),
+      gender: profile.gender ?? "",
+    });
   }
 
   for (const record of records) {
     await saveEncounterRecord({
       patientDraft: {
+        patientId: record.patientId ?? "",
         name: record.patientName,
         age: record.patientAge === undefined ? "" : String(record.patientAge),
         gender: record.patientGender ?? "",
@@ -1050,9 +1356,10 @@ const syncGuestRecordsToAccount = async (guestId: string) => {
   }
 
   localStorage.removeItem(getGuestRecordsKey(guestId));
+  localStorage.removeItem(getGuestPatientProfilesKey(guestId));
   clearPendingGuestSync();
 
-  return records.length;
+  return records.length + profiles.length;
 };
 
 const getTranslationLanguages = (note: NoteResult | null) =>
@@ -1212,6 +1519,286 @@ const renderNumberedText = (value: unknown) => {
   );
 };
 
+const escapeHtml = (value: string) =>
+  value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+
+const printableParagraph = (value: unknown) =>
+  `<p>${escapeHtml(asText(value)).replace(/\n/g, "<br />")}</p>`;
+
+const printableList = (
+  items: string[],
+  options: { ordered?: boolean; emptyText?: string } = {},
+) => {
+  if (items.length === 0) {
+    return `<p class="muted">${escapeHtml(options.emptyText ?? "Not documented.")}</p>`;
+  }
+
+  const tag = options.ordered ? "ol" : "ul";
+  const listItems = items
+    .map((item) => `<li>${escapeHtml(item)}</li>`)
+    .join("");
+
+  return `<${tag}>${listItems}</${tag}>`;
+};
+
+const printableArrayList = (items: unknown) =>
+  printableList(asStringArray(items), { emptyText: "None documented." });
+
+const printableField = (label: string, value: string) => `
+  <div class="field">
+    <dt>${escapeHtml(label)}</dt>
+    <dd>${escapeHtml(value || "Not documented.")}</dd>
+  </div>
+`;
+
+const getPrintableDate = (value: string) => {
+  if (!value) {
+    return "";
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return value;
+  }
+
+  return formatDate(value);
+};
+
+const buildPrintableNoteHtml = ({
+  note,
+  patientDraft,
+  heading,
+  noteLabel,
+}: {
+  note: NoteResult;
+  patientDraft: PatientDraft;
+  heading: string;
+  noteLabel: string;
+}) => {
+  const soap = note.soap ?? {};
+  const extracted = note.extracted ?? {};
+  const planItems = splitNumberedItems(soap.plan);
+  const printablePlanItems =
+    planItems.length > 0 ? planItems : splitClinicalItems(soap.plan);
+  const exportedAt = new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date());
+
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>${escapeHtml(heading)} - ClinicScribe PDF</title>
+    <style>
+      @page {
+        margin: 0.65in;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        color: #111827;
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 12px;
+        line-height: 1.55;
+      }
+
+      header {
+        border-bottom: 2px solid #111827;
+        margin-bottom: 20px;
+        padding-bottom: 14px;
+      }
+
+      h1 {
+        font-size: 24px;
+        line-height: 1.2;
+        margin: 0 0 6px;
+      }
+
+      h2 {
+        border-bottom: 1px solid #d4d4d8;
+        font-size: 15px;
+        margin: 22px 0 10px;
+        padding-bottom: 5px;
+        text-transform: uppercase;
+      }
+
+      h3 {
+        font-size: 13px;
+        margin: 0 0 6px;
+      }
+
+      p {
+        margin: 0;
+        white-space: pre-wrap;
+      }
+
+      ul,
+      ol {
+        margin: 0;
+        padding-left: 20px;
+      }
+
+      li + li {
+        margin-top: 4px;
+      }
+
+      .meta {
+        color: #52525b;
+        font-size: 11px;
+      }
+
+      .grid {
+        display: grid;
+        gap: 8px 18px;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .field {
+        border-bottom: 1px solid #e4e4e7;
+        padding-bottom: 6px;
+      }
+
+      dt {
+        color: #52525b;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        margin-bottom: 2px;
+        text-transform: uppercase;
+      }
+
+      dd {
+        margin: 0;
+      }
+
+      .soap-grid,
+      .extracted-grid {
+        display: grid;
+        gap: 14px 20px;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .full {
+        grid-column: 1 / -1;
+      }
+
+      .muted {
+        color: #71717a;
+        font-style: italic;
+      }
+
+      footer {
+        border-top: 1px solid #d4d4d8;
+        color: #71717a;
+        font-size: 10px;
+        margin-top: 28px;
+        padding-top: 8px;
+      }
+
+      @media print {
+        button {
+          display: none;
+        }
+
+        section {
+          break-inside: avoid;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <p class="meta">ClinicScribe clinical note export</p>
+      <h1>${escapeHtml(heading)}</h1>
+      <p class="meta">${escapeHtml(noteLabel)} | Exported ${escapeHtml(exportedAt)}</p>
+    </header>
+
+    <section>
+      <h2>Patient and Visit</h2>
+      <dl class="grid">
+        ${printableField("Patient name", patientDraft.name)}
+        ${printableField("Patient ID", patientDraft.patientId)}
+        ${printableField("Age", patientDraft.age)}
+        ${printableField("Gender", patientDraft.gender)}
+        ${printableField("Visit date", getPrintableDate(patientDraft.visitDate))}
+        ${printableField("Diagnosis", patientDraft.diagnosis)}
+      </dl>
+    </section>
+
+    <section>
+      <h2>SOAP</h2>
+      <div class="soap-grid">
+        <div>
+          <h3>Subjective</h3>
+          ${printableList(splitClinicalItems(soap.subjective))}
+        </div>
+        <div>
+          <h3>Objective</h3>
+          ${printableList(splitClinicalItems(soap.objective))}
+        </div>
+        <div>
+          <h3>Assessment</h3>
+          ${printableList(splitClinicalItems(soap.assessment))}
+        </div>
+        <div>
+          <h3>Plan</h3>
+          ${printableList(printablePlanItems, { ordered: true })}
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Visit Summary</h2>
+      ${printableParagraph(note.visit_summary)}
+    </section>
+
+    <section>
+      <h2>Extracted Data</h2>
+      <div class="extracted-grid">
+        <div>
+          <h3>Symptoms</h3>
+          ${printableArrayList(extracted.symptoms)}
+        </div>
+        <div>
+          <h3>Medications</h3>
+          ${printableArrayList(extracted.medications)}
+        </div>
+        <div>
+          <h3>Follow-up Plan</h3>
+          ${printableArrayList(extracted.follow_up_plan)}
+        </div>
+        <div>
+          <h3>Red Flags</h3>
+          ${printableArrayList(extracted.red_flags)}
+        </div>
+        <div class="full">
+          <h3>Uncertainties</h3>
+          ${printableArrayList(note.uncertainties)}
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Discharge Instructions</h2>
+      ${printableParagraph(note.discharge_instructions)}
+    </section>
+
+    <footer>
+      Transcript, recordings, and chat history are intentionally excluded from this PDF export.
+    </footer>
+  </body>
+</html>`;
+};
+
 function App() {
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
@@ -1241,6 +1828,7 @@ function App() {
   );
   const [isSavingPatientRecord, setIsSavingPatientRecord] = useState(false);
   const [patientRecordStatus, setPatientRecordStatus] = useState("");
+  const [isSavingPatientProfile, setIsSavingPatientProfile] = useState(false);
   const [pendingRecordings, setPendingRecordings] = useState<NoteRecording[]>([]);
   const [currentNoteRecordings, setCurrentNoteRecordings] = useState<
     NoteRecording[]
@@ -1250,10 +1838,19 @@ function App() {
     getViewFromPathname(window.location.pathname),
   );
   const [savedNotes, setSavedNotes] = useState<SavedNoteSummary[]>([]);
+  const [patientProfiles, setPatientProfiles] = useState<PatientProfile[]>([]);
+  const [selectedPatientProfileId, setSelectedPatientProfileId] = useState(() =>
+    getPatientProfileIdFromPathname(window.location.pathname),
+  );
   const [isLoadingNotes, setIsLoadingNotes] = useState(false);
   const [vaultError, setVaultError] = useState("");
   const [dashboardSearch, setDashboardSearch] = useState("");
   const [dashboardSort, setDashboardSort] = useState<DashboardSort>("newest");
+  const [dashboardFilters, setDashboardFilters] = useState<DashboardFilters>(
+    EMPTY_DASHBOARD_FILTERS,
+  );
+  const [isDashboardFilterPanelOpen, setIsDashboardFilterPanelOpen] =
+    useState(false);
   const [languageSearch, setLanguageSearch] = useState("");
   const [isLanguagePickerOpen, setIsLanguagePickerOpen] = useState(false);
   const [selectedTranslationLanguage, setSelectedTranslationLanguage] =
@@ -1370,7 +1967,7 @@ function App() {
 
         if (syncedCount > 0) {
           setStatus(
-            `Synced ${syncedCount} guest note${syncedCount === 1 ? "" : "s"}`,
+            `Synced ${syncedCount} guest item${syncedCount === 1 ? "" : "s"}`,
           );
           setNoteResult(null);
           setBaseNoteResult(null);
@@ -1493,6 +2090,8 @@ function App() {
       setPendingRecordings([]);
       setCurrentNoteRecordings([]);
       setSavedNotes([]);
+      setPatientProfiles([]);
+      setSelectedPatientProfileId("");
       setSelectedTranslationLanguage("");
       setNoteError("");
       setHasHydratedAutosave(false);
@@ -1532,6 +2131,26 @@ function App() {
     }
   };
 
+  const loadPatientProfiles = async () => {
+    setVaultError("");
+
+    try {
+      const profiles = isGuestMode
+        ? readGuestPatientProfiles(guestId)
+        : await listPatientProfiles();
+
+      setPatientProfiles(profiles);
+      return profiles;
+    } catch (profileError) {
+      setVaultError(
+        profileError instanceof Error
+          ? profileError.message
+          : "Unable to load patient profiles.",
+      );
+      return [];
+    }
+  };
+
   const navigateToView = (view: AppView) => {
     const nextPath = VIEW_PATHS[view];
 
@@ -1543,7 +2162,25 @@ function App() {
 
     if (view === "dashboard") {
       void loadSavedNotes();
+      void loadPatientProfiles();
     }
+  };
+
+  const navigateToPatientProfile = (profileId: string) => {
+    if (!profileId) {
+      return;
+    }
+
+    const nextPath = getPatientProfilePath(profileId);
+
+    if (window.location.pathname !== nextPath) {
+      window.history.pushState(null, "", nextPath);
+    }
+
+    setSelectedPatientProfileId(profileId);
+    setActiveView("patient");
+    void loadSavedNotes();
+    void loadPatientProfiles();
   };
 
   const openSavedNote = async (noteId: string) => {
@@ -1559,8 +2196,11 @@ function App() {
       }
 
       const noteResultDraft = note.result as NoteResult;
+      const loadedPatientDraft = getPatientDraftFromNote(noteResultDraft);
       const nextPatientDraft = {
-        ...getPatientDraftFromNote(noteResultDraft),
+        ...loadedPatientDraft,
+        patientProfileId: note.patientProfileId ?? loadedPatientDraft.patientProfileId,
+        patientId: note.patientId ?? loadedPatientDraft.patientId,
         name: note.patientName,
         age: note.patientAge === undefined ? "" : String(note.patientAge),
         gender: note.patientGender ?? "",
@@ -2293,6 +2933,8 @@ function App() {
       );
       setPatientDraft({
         ...patientDraft,
+        patientProfileId: savedEncounter.patientProfileId,
+        patientId: savedEncounter.patientId ?? "",
         name: savedEncounter.patientName,
         age:
           savedEncounter.patientAge === undefined
@@ -2305,6 +2947,7 @@ function App() {
       setSavedNotes((currentNotes) =>
         upsertSavedNoteSummary(currentNotes, savedSummary),
       );
+      void loadPatientProfiles();
       lastPatientRecordAutosaveSignatureRef.current =
         options.signature || getPatientRecordAutosaveSignature(savedNoteResult);
       setPatientRecordStatus(
@@ -2327,6 +2970,78 @@ function App() {
       }
     } finally {
       setIsSavingPatientRecord(false);
+    }
+  };
+
+  const assignPatientProfile = (profileId: string) => {
+    if (!profileId) {
+      setPatientDraft((current) => ({
+        ...current,
+        patientProfileId: undefined,
+      }));
+      setPatientRecordStatus("Patient profile unassigned.");
+      return;
+    }
+
+    const profile = patientProfiles.find(
+      (patientProfile) => patientProfile.profileId === profileId,
+    );
+
+    if (!profile) {
+      setNoteError("Patient profile not found.");
+      return;
+    }
+
+    setNoteError("");
+    setPatientDraft((current) => ({
+      ...current,
+      ...getPatientProfileDraftPatch(profile),
+    }));
+    setPatientRecordStatus(`Assigned to ${profile.name}. Autosave will update this note.`);
+  };
+
+  const createPatientProfileFromDraft = async () => {
+    if (!patientDraft.name.trim()) {
+      setNoteError("Add a patient name before creating a profile.");
+      return;
+    }
+
+    setIsSavingPatientProfile(true);
+    setNoteError("");
+    setPatientRecordStatus("Creating patient profile...");
+
+    try {
+      const profile = isGuestMode
+        ? upsertGuestPatientProfile(guestId, {
+            patientId: patientDraft.patientId,
+            name: patientDraft.name,
+            age: patientDraft.age,
+            gender: patientDraft.gender,
+          })
+        : await savePatientProfile({
+            patientId: patientDraft.patientId,
+            name: patientDraft.name,
+            age: patientDraft.age,
+            gender: patientDraft.gender,
+          });
+
+      setPatientProfiles((currentProfiles) =>
+        upsertPatientProfileList(currentProfiles, profile),
+      );
+      setPatientDraft((current) => ({
+        ...current,
+        ...getPatientProfileDraftPatch(profile),
+      }));
+      setPatientRecordStatus(`Patient profile ready: ${profile.name}.`);
+    } catch (profileError) {
+      setNoteError(
+        profileError instanceof Error
+          ? profileError.message
+          : "Unable to create patient profile.",
+      );
+      setPatientRecordStatus("");
+    } finally {
+      setIsSavingPatientProfile(false);
     }
   };
 
@@ -2394,6 +3109,7 @@ function App() {
     }
 
     void loadSavedNotes();
+    void loadPatientProfiles();
   }, [currentUser]);
 
   useEffect(() => {
@@ -2401,9 +3117,13 @@ function App() {
       const nextView = getViewFromPathname(window.location.pathname);
 
       setActiveView(nextView);
+      setSelectedPatientProfileId(
+        getPatientProfileIdFromPathname(window.location.pathname),
+      );
 
-      if (currentUser && nextView === "dashboard") {
+      if (currentUser && (nextView === "dashboard" || nextView === "patient")) {
         void loadSavedNotes();
+        void loadPatientProfiles();
       }
     };
 
@@ -2874,7 +3594,66 @@ function App() {
     getStringValue(noteResult?.visit_summary) ||
     noteHeading ||
     "Saved ClinicScribe note";
+  const exportCurrentNotePdf = () => {
+    if (!noteResult) {
+      setNoteError("Generate or open a note before exporting a PDF.");
+      return;
+    }
+
+    const pdfWindow = window.open("", "_blank", "width=900,height=1200");
+
+    if (!pdfWindow) {
+      setNoteError("Allow pop-ups for ClinicScribe, then try exporting again.");
+      return;
+    }
+
+    setNoteError("");
+    pdfWindow.document.open();
+    pdfWindow.document.write(
+      buildPrintableNoteHtml({
+        note: noteResult,
+        patientDraft,
+        heading: displayedNoteHeading,
+        noteLabel: activeNoteLabel,
+      }),
+    );
+    pdfWindow.document.close();
+
+    let didPrint = false;
+    const printPdf = () => {
+      if (didPrint) {
+        return;
+      }
+
+      didPrint = true;
+      pdfWindow.focus();
+      pdfWindow.print();
+    };
+
+    pdfWindow.addEventListener(
+      "load",
+      () => {
+        window.setTimeout(printPdf, 100);
+      },
+      { once: true },
+    );
+    window.setTimeout(printPdf, 300);
+  };
   const dashboardSearchTerm = dashboardSearch.trim().toLowerCase();
+  const dashboardPatientNameOptions = getUniqueSortedValues(
+    savedNotes.map((savedNote) => savedNote.patientName),
+  );
+  const dashboardPatientIdOptions = getUniqueSortedValues(
+    savedNotes.map((savedNote) => savedNote.patientId),
+  );
+  const dashboardGenderOptions = getUniqueSortedValues(
+    savedNotes.map((savedNote) => savedNote.patientGender),
+  );
+  const dashboardMinAge = parseFilterNumber(dashboardFilters.ageMin);
+  const dashboardMaxAge = parseFilterNumber(dashboardFilters.ageMax);
+  const dashboardDiagnosisFilter = dashboardFilters.diagnosis.trim().toLowerCase();
+  const activeDashboardFilterCount =
+    getActiveDashboardFilterCount(dashboardFilters);
   const visibleSavedNotes = savedNotes
     .filter((savedNote) => {
       if (!dashboardSearchTerm) {
@@ -2882,6 +3661,7 @@ function App() {
       }
 
       return [
+        savedNote.patientId,
         savedNote.patientName,
         savedNote.title,
         savedNote.diagnosis,
@@ -2891,6 +3671,52 @@ function App() {
         .some((value) =>
           String(value).toLowerCase().includes(dashboardSearchTerm),
         );
+    })
+    .filter((savedNote) => {
+      if (!selectionIncludes(dashboardFilters.patientNames, savedNote.patientName)) {
+        return false;
+      }
+
+      if (!selectionIncludes(dashboardFilters.patientIds, savedNote.patientId)) {
+        return false;
+      }
+
+      if (!selectionIncludes(dashboardFilters.genders, savedNote.patientGender)) {
+        return false;
+      }
+
+      if (
+        dashboardMinAge !== undefined &&
+        (savedNote.patientAge === undefined || savedNote.patientAge < dashboardMinAge)
+      ) {
+        return false;
+      }
+
+      if (
+        dashboardMaxAge !== undefined &&
+        (savedNote.patientAge === undefined || savedNote.patientAge > dashboardMaxAge)
+      ) {
+        return false;
+      }
+
+      if (
+        dashboardDiagnosisFilter &&
+        !normalizeFilterKey(savedNote.diagnosis).includes(dashboardDiagnosisFilter)
+      ) {
+        return false;
+      }
+
+      const visitDate = getDateInputValue(savedNote.visitDate ?? savedNote.createdAt);
+
+      if (dashboardFilters.visitDateFrom && visitDate < dashboardFilters.visitDateFrom) {
+        return false;
+      }
+
+      if (dashboardFilters.visitDateTo && visitDate > dashboardFilters.visitDateTo) {
+        return false;
+      }
+
+      return true;
     })
     .sort((left, right) => {
       if (left.pinned !== right.pinned) {
@@ -2903,21 +3729,42 @@ function App() {
         );
       }
 
-      if (dashboardSort === "diagnosis") {
-        return (left.diagnosis || "").localeCompare(right.diagnosis || "");
+      if (dashboardSort === "oldest") {
+        return getSavedNoteVisitTime(left) - getSavedNoteVisitTime(right);
       }
 
-      return Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
+      return getSavedNoteVisitTime(right) - getSavedNoteVisitTime(left);
     });
+  const assignedPatientProfile = patientDraft.patientProfileId
+    ? patientProfiles.find(
+        (profile) => profile.profileId === patientDraft.patientProfileId,
+      )
+    : undefined;
+  const selectedPatientProfile = selectedPatientProfileId
+    ? patientProfiles.find(
+        (profile) => profile.profileId === selectedPatientProfileId,
+      )
+    : undefined;
+  const selectedPatientProfileNotes = selectedPatientProfile
+    ? savedNotes
+        .filter((savedNote) =>
+          savedNoteMatchesPatientProfile(savedNote, selectedPatientProfile),
+        )
+        .sort((left, right) => getSavedNoteVisitTime(right) - getSavedNoteVisitTime(left))
+    : [];
   const pageTitle =
     activeView === "dashboard"
       ? "Patient dashboard"
+      : activeView === "patient"
+        ? selectedPatientProfile?.name ?? "Patient profile"
       : activeView === "note"
         ? "Clinical note"
         : "ClinicScribe";
   const pageDescription =
     activeView === "dashboard"
       ? "Search and sort saved patient encounters."
+      : activeView === "patient"
+        ? "Patient profile and saved encounters."
       : activeView === "scribe"
         ? "Clinical notes faster, clearer, and ready for review."
         : "";
@@ -3071,13 +3918,13 @@ function App() {
                 </div>
               ) : null}
 
-              <div className="mt-5 grid gap-3 lg:grid-cols-[1fr_auto] lg:items-end">
+              <div className="mt-5 grid gap-3 lg:grid-cols-[1fr_auto_auto] lg:items-end">
                 <label className="block text-sm font-medium text-zinc-700">
                   Search records
                   <input
                     className="mt-2 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-zinc-950 outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100"
                     onChange={(event) => setDashboardSearch(event.target.value)}
-                    placeholder="Patient, diagnosis, or note title"
+                    placeholder="Patient, ID, diagnosis, or note title"
                     type="search"
                     value={dashboardSearch}
                   />
@@ -3093,11 +3940,290 @@ function App() {
                     value={dashboardSort}
                   >
                     <option value="newest">Newest visit</option>
+                    <option value="oldest">Oldest visit</option>
                     <option value="patient">Patient name</option>
-                    <option value="diagnosis">Diagnosis</option>
                   </select>
                 </label>
+
+                <button
+                  className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-zinc-300 px-4 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
+                  onClick={() => setIsDashboardFilterPanelOpen(true)}
+                  type="button"
+                >
+                  <Icon name="filter" />
+                  Filters
+                  {activeDashboardFilterCount > 0 ? (
+                    <span className="rounded-lg bg-zinc-950 px-2 py-0.5 text-xs text-white">
+                      {activeDashboardFilterCount}
+                    </span>
+                  ) : null}
+                </button>
               </div>
+
+              {isDashboardFilterPanelOpen ? (
+                <div className="fixed inset-0 z-40">
+                  <button
+                    aria-label="Close filters"
+                    className="absolute inset-0 bg-zinc-950/30"
+                    onClick={() => setIsDashboardFilterPanelOpen(false)}
+                    type="button"
+                  />
+
+                  <aside className="absolute right-0 top-0 flex h-full w-full max-w-md flex-col border-l border-zinc-200 bg-white shadow-2xl">
+                    <div className="flex items-start justify-between gap-4 border-b border-zinc-200 px-5 py-4">
+                      <div>
+                        <h2 className="text-lg font-semibold text-zinc-950">
+                          Filters
+                        </h2>
+                        <p className="mt-1 text-sm text-zinc-500">
+                          Narrow saved patient encounters.
+                        </p>
+                      </div>
+                      <IconButton
+                        icon="x"
+                        label="Close filters"
+                        onClick={() => setIsDashboardFilterPanelOpen(false)}
+                      />
+                    </div>
+
+                    <div className="min-h-0 flex-1 space-y-6 overflow-y-auto px-5 py-5">
+                      <section>
+                        <h3 className="text-sm font-semibold text-zinc-900">
+                          Patient name
+                        </h3>
+                        <div className="mt-3 max-h-40 space-y-2 overflow-y-auto rounded-lg border border-zinc-200 p-3">
+                          {dashboardPatientNameOptions.length > 0 ? (
+                            dashboardPatientNameOptions.map((patientName) => (
+                              <label
+                                className="flex items-center gap-2 text-sm text-zinc-700"
+                                key={patientName}
+                              >
+                                <input
+                                  checked={dashboardFilters.patientNames.some(
+                                    (selectedName) =>
+                                      normalizeFilterKey(selectedName) ===
+                                      normalizeFilterKey(patientName),
+                                  )}
+                                  className="h-4 w-4 rounded border-zinc-300 text-zinc-950 focus:ring-zinc-400"
+                                  onChange={() =>
+                                    setDashboardFilters((current) => ({
+                                      ...current,
+                                      patientNames: toggleFilterValue(
+                                        current.patientNames,
+                                        patientName,
+                                      ),
+                                    }))
+                                  }
+                                  type="checkbox"
+                                />
+                                <span>{patientName}</span>
+                              </label>
+                            ))
+                          ) : (
+                            <p className="text-sm text-zinc-500">
+                              No saved patient names yet.
+                            </p>
+                          )}
+                        </div>
+                      </section>
+
+                      <section>
+                        <h3 className="text-sm font-semibold text-zinc-900">
+                          Patient ID
+                        </h3>
+                        <div className="mt-3 max-h-40 space-y-2 overflow-y-auto rounded-lg border border-zinc-200 p-3">
+                          {dashboardPatientIdOptions.length > 0 ? (
+                            dashboardPatientIdOptions.map((patientId) => (
+                              <label
+                                className="flex items-center gap-2 text-sm text-zinc-700"
+                                key={patientId}
+                              >
+                                <input
+                                  checked={dashboardFilters.patientIds.some(
+                                    (selectedId) =>
+                                      normalizeFilterKey(selectedId) ===
+                                      normalizeFilterKey(patientId),
+                                  )}
+                                  className="h-4 w-4 rounded border-zinc-300 text-zinc-950 focus:ring-zinc-400"
+                                  onChange={() =>
+                                    setDashboardFilters((current) => ({
+                                      ...current,
+                                      patientIds: toggleFilterValue(
+                                        current.patientIds,
+                                        patientId,
+                                      ),
+                                    }))
+                                  }
+                                  type="checkbox"
+                                />
+                                <span>{patientId}</span>
+                              </label>
+                            ))
+                          ) : (
+                            <p className="text-sm text-zinc-500">
+                              Add a Patient ID to a record to filter by it.
+                            </p>
+                          )}
+                        </div>
+                      </section>
+
+                      <section>
+                        <h3 className="text-sm font-semibold text-zinc-900">
+                          Age
+                        </h3>
+                        <div className="mt-3 grid grid-cols-2 gap-3">
+                          <label className="block text-sm font-medium text-zinc-700">
+                            Min
+                            <input
+                              className="mt-2 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-zinc-950 outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100"
+                              max="130"
+                              min="0"
+                              onChange={(event) =>
+                                setDashboardFilters((current) => ({
+                                  ...current,
+                                  ageMin: event.target.value,
+                                }))
+                              }
+                              type="number"
+                              value={dashboardFilters.ageMin}
+                            />
+                          </label>
+                          <label className="block text-sm font-medium text-zinc-700">
+                            Max
+                            <input
+                              className="mt-2 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-zinc-950 outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100"
+                              max="130"
+                              min="0"
+                              onChange={(event) =>
+                                setDashboardFilters((current) => ({
+                                  ...current,
+                                  ageMax: event.target.value,
+                                }))
+                              }
+                              type="number"
+                              value={dashboardFilters.ageMax}
+                            />
+                          </label>
+                        </div>
+                      </section>
+
+                      <section>
+                        <h3 className="text-sm font-semibold text-zinc-900">
+                          Gender
+                        </h3>
+                        <div className="mt-3 space-y-2 rounded-lg border border-zinc-200 p-3">
+                          {dashboardGenderOptions.length > 0 ? (
+                            dashboardGenderOptions.map((gender) => (
+                              <label
+                                className="flex items-center gap-2 text-sm text-zinc-700"
+                                key={gender}
+                              >
+                                <input
+                                  checked={dashboardFilters.genders.some(
+                                    (selectedGender) =>
+                                      normalizeFilterKey(selectedGender) ===
+                                      normalizeFilterKey(gender),
+                                  )}
+                                  className="h-4 w-4 rounded border-zinc-300 text-zinc-950 focus:ring-zinc-400"
+                                  onChange={() =>
+                                    setDashboardFilters((current) => ({
+                                      ...current,
+                                      genders: toggleFilterValue(
+                                        current.genders,
+                                        gender,
+                                      ),
+                                    }))
+                                  }
+                                  type="checkbox"
+                                />
+                                <span>{gender}</span>
+                              </label>
+                            ))
+                          ) : (
+                            <p className="text-sm text-zinc-500">
+                              No saved gender values yet.
+                            </p>
+                          )}
+                        </div>
+                      </section>
+
+                      <section>
+                        <label className="block text-sm font-semibold text-zinc-900">
+                          Diagnosis
+                          <input
+                            className="mt-3 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-zinc-950 outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100"
+                            onChange={(event) =>
+                              setDashboardFilters((current) => ({
+                                ...current,
+                                diagnosis: event.target.value,
+                              }))
+                            }
+                            placeholder="Contains..."
+                            type="text"
+                            value={dashboardFilters.diagnosis}
+                          />
+                        </label>
+                      </section>
+
+                      <section>
+                        <h3 className="text-sm font-semibold text-zinc-900">
+                          Visit date
+                        </h3>
+                        <div className="mt-3 grid grid-cols-2 gap-3">
+                          <label className="block text-sm font-medium text-zinc-700">
+                            From
+                            <input
+                              className="mt-2 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-zinc-950 outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100"
+                              onChange={(event) =>
+                                setDashboardFilters((current) => ({
+                                  ...current,
+                                  visitDateFrom: event.target.value,
+                                }))
+                              }
+                              type="date"
+                              value={dashboardFilters.visitDateFrom}
+                            />
+                          </label>
+                          <label className="block text-sm font-medium text-zinc-700">
+                            To
+                            <input
+                              className="mt-2 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-zinc-950 outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100"
+                              onChange={(event) =>
+                                setDashboardFilters((current) => ({
+                                  ...current,
+                                  visitDateTo: event.target.value,
+                                }))
+                              }
+                              type="date"
+                              value={dashboardFilters.visitDateTo}
+                            />
+                          </label>
+                        </div>
+                      </section>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-3 border-t border-zinc-200 px-5 py-4">
+                      <button
+                        className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:text-zinc-400"
+                        disabled={activeDashboardFilterCount === 0}
+                        onClick={() =>
+                          setDashboardFilters(EMPTY_DASHBOARD_FILTERS)
+                        }
+                        type="button"
+                      >
+                        Clear filters
+                      </button>
+                      <button
+                        className="rounded-lg bg-zinc-950 px-4 py-2 text-sm font-semibold text-white transition hover:bg-zinc-800"
+                        onClick={() => setIsDashboardFilterPanelOpen(false)}
+                        type="button"
+                      >
+                        Done
+                      </button>
+                    </div>
+                  </aside>
+                </div>
+              ) : null}
 
               <div className="mt-5 space-y-3">
                 {visibleSavedNotes.length === 0 && !isLoadingNotes ? (
@@ -3129,6 +4255,9 @@ function App() {
                           <span>{savedNote.patientName || savedNote.title}</span>
                         </p>
                         <p className="mt-1 text-sm text-zinc-500">
+                          {savedNote.patientId
+                            ? `ID ${savedNote.patientId} - `
+                            : ""}
                           {savedNote.patientAge !== undefined
                             ? `Age ${savedNote.patientAge} - `
                             : ""}
@@ -3159,6 +4288,26 @@ function App() {
                       </button>
 
                       <div className="flex flex-wrap gap-2">
+                        <button
+                          className="rounded-lg border border-zinc-300 px-3 py-2 text-xs font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-white"
+                          onClick={() => {
+                            const profileId =
+                              savedNote.patientProfileId ??
+                              patientProfiles.find((patientProfile) =>
+                                savedNoteMatchesPatientProfile(
+                                  savedNote,
+                                  patientProfile,
+                                ),
+                              )?.profileId;
+
+                            if (profileId) {
+                              navigateToPatientProfile(profileId);
+                            }
+                          }}
+                          type="button"
+                        >
+                          Profile
+                        </button>
                         <IconButton
                           icon={savedNote.pinned ? "pinOff" : "pin"}
                           label={savedNote.pinned ? "Unpin" : "Pin"}
@@ -3180,6 +4329,127 @@ function App() {
                   </div>
                 ))}
               </div>
+            </div>
+          ) : activeView === "patient" ? (
+            <div className="rounded-2xl border border-zinc-200 p-5">
+              {vaultError ? (
+                <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                  {vaultError}
+                </div>
+              ) : null}
+
+              {selectedPatientProfile ? (
+                <div className="space-y-6">
+                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                    <div>
+                      <p className="text-sm font-semibold text-zinc-500">
+                        Patient profile
+                      </p>
+                      <h2 className="mt-1 text-2xl font-semibold text-zinc-950">
+                        {selectedPatientProfile.name}
+                      </h2>
+                      <p className="mt-2 text-sm text-zinc-500">
+                        {formatPatientProfileLabel(selectedPatientProfile)}
+                      </p>
+                    </div>
+
+                    <button
+                      className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
+                      onClick={() => navigateToView("dashboard")}
+                      type="button"
+                    >
+                      Back to dashboard
+                    </button>
+                  </div>
+
+                  <dl className="grid gap-3 md:grid-cols-2">
+                    <div className="rounded-lg bg-zinc-50 px-4 py-3">
+                      <dt className="text-xs font-semibold uppercase tracking-normal text-zinc-500">
+                        Patient ID
+                      </dt>
+                      <dd className="mt-1 text-sm text-zinc-950">
+                        {selectedPatientProfile.patientId || "Not documented"}
+                      </dd>
+                    </div>
+                    <div className="rounded-lg bg-zinc-50 px-4 py-3">
+                      <dt className="text-xs font-semibold uppercase tracking-normal text-zinc-500">
+                        Age
+                      </dt>
+                      <dd className="mt-1 text-sm text-zinc-950">
+                        {selectedPatientProfile.age === undefined
+                          ? "Not documented"
+                          : selectedPatientProfile.age}
+                      </dd>
+                    </div>
+                    <div className="rounded-lg bg-zinc-50 px-4 py-3">
+                      <dt className="text-xs font-semibold uppercase tracking-normal text-zinc-500">
+                        Gender
+                      </dt>
+                      <dd className="mt-1 text-sm text-zinc-950">
+                        {selectedPatientProfile.gender || "Not documented"}
+                      </dd>
+                    </div>
+                    <div className="rounded-lg bg-zinc-50 px-4 py-3">
+                      <dt className="text-xs font-semibold uppercase tracking-normal text-zinc-500">
+                        Saved encounters
+                      </dt>
+                      <dd className="mt-1 text-sm text-zinc-950">
+                        {selectedPatientProfileNotes.length}
+                      </dd>
+                    </div>
+                  </dl>
+
+                  <section>
+                    <h3 className="text-lg font-semibold text-zinc-950">
+                      Encounters
+                    </h3>
+                    <div className="mt-4 space-y-3">
+                      {selectedPatientProfileNotes.length > 0 ? (
+                        selectedPatientProfileNotes.map((savedNote) => (
+                          <div
+                            className="rounded-xl border border-zinc-200 bg-white px-4 py-3 transition hover:border-zinc-400 hover:bg-zinc-50"
+                            key={savedNote.id}
+                          >
+                            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                              <button
+                                className="min-w-0 flex-1 text-left"
+                                onClick={() => void openSavedNote(savedNote.id)}
+                                type="button"
+                              >
+                                <p className="font-semibold text-zinc-950">
+                                  {savedNote.title}
+                                </p>
+                                <p className="mt-1 text-sm text-zinc-500">
+                                  {savedNote.diagnosis
+                                    ? `${savedNote.diagnosis} - `
+                                    : ""}
+                                  {savedNote.visitDate
+                                    ? formatDate(savedNote.visitDate)
+                                    : formatDate(savedNote.createdAt)}
+                                </p>
+                              </button>
+
+                              <IconButton
+                                icon="pen"
+                                label="Open note"
+                                onClick={() => void openSavedNote(savedNote.id)}
+                              />
+                            </div>
+                          </div>
+                        ))
+                      ) : (
+                        <p className="rounded-xl bg-zinc-50 px-4 py-3 text-sm text-zinc-500">
+                          No saved encounters for this patient yet.
+                        </p>
+                      )}
+                    </div>
+                  </section>
+                </div>
+              ) : (
+                <div className="rounded-xl bg-zinc-50 px-4 py-3 text-sm text-zinc-500">
+                  Patient profile not found. Return to the dashboard and open a saved profile.
+                </div>
+              )}
             </div>
           ) : activeView === "scribe" ? (
             <>
@@ -3278,13 +4548,25 @@ function App() {
               </h2>
             </div>
 
-            <button
-              className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
-              onClick={() => navigateToView("scribe")}
-              type="button"
-            >
-              Return home
-            </button>
+            <div className="flex flex-wrap gap-2">
+              {noteResult ? (
+                <button
+                  className="rounded-lg bg-zinc-950 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-zinc-800"
+                  onClick={exportCurrentNotePdf}
+                  type="button"
+                >
+                  Export PDF
+                </button>
+              ) : null}
+
+              <button
+                className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
+                onClick={() => navigateToView("scribe")}
+                type="button"
+              >
+                Return home
+              </button>
+            </div>
           </div>
 
           {noteError ? (
@@ -3437,6 +4719,54 @@ function App() {
                   </p>
                 </div>
 
+                <div className="mt-4 rounded-xl bg-zinc-50 p-4">
+                  <div className="grid gap-3 lg:grid-cols-[1fr_auto_auto] lg:items-end">
+                    <label className="block text-sm font-medium text-zinc-700">
+                      Assign patient profile
+                      <select
+                        className="mt-2 w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-zinc-950 outline-none transition focus:border-zinc-400 focus:ring-4 focus:ring-zinc-100"
+                        onChange={(event) => assignPatientProfile(event.target.value)}
+                        value={patientDraft.patientProfileId ?? ""}
+                      >
+                        <option value="">No assigned profile</option>
+                        {patientProfiles.map((profile) => (
+                          <option key={profile.profileId} value={profile.profileId}>
+                            {formatPatientProfileLabel(profile)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <button
+                      className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-white disabled:cursor-not-allowed disabled:text-zinc-400"
+                      disabled={isSavingPatientProfile || !patientDraft.name.trim()}
+                      onClick={() => void createPatientProfileFromDraft()}
+                      type="button"
+                    >
+                      {isSavingPatientProfile ? "Creating..." : "Create new profile"}
+                    </button>
+
+                    <button
+                      className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-white disabled:cursor-not-allowed disabled:text-zinc-400"
+                      disabled={!assignedPatientProfile}
+                      onClick={() => {
+                        if (assignedPatientProfile) {
+                          navigateToPatientProfile(assignedPatientProfile.profileId);
+                        }
+                      }}
+                      type="button"
+                    >
+                      View profile
+                    </button>
+                  </div>
+
+                  <p className="mt-3 text-xs text-zinc-500">
+                    {assignedPatientProfile
+                      ? `Assigned to ${formatPatientProfileLabel(assignedPatientProfile)}.`
+                      : "Choose an existing patient or create a profile from the fields below."}
+                  </p>
+                </div>
+
                 <div className="mt-4 grid gap-4 md:grid-cols-2">
                   <label className="block text-sm font-medium text-zinc-700">
                     Patient name
@@ -3451,6 +4781,22 @@ function App() {
                       placeholder="Unknown patient"
                       type="text"
                       value={patientDraft.name}
+                    />
+                  </label>
+
+                  <label className="block text-sm font-medium text-zinc-700">
+                    Patient ID
+                    <input
+                      className="mt-2 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-zinc-950 outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100"
+                      onChange={(event) =>
+                        setPatientDraft((current) => ({
+                          ...current,
+                          patientId: event.target.value,
+                        }))
+                      }
+                      placeholder="MRN or clinic ID"
+                      type="text"
+                      value={patientDraft.patientId}
                     />
                   </label>
 
