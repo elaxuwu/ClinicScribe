@@ -9,6 +9,8 @@ import {
   type ProviderUsed,
 } from "../../src/server/note-store";
 
+// Generates the first clinical note from a transcript, then saves the note
+// envelope in Redis for the note vault.
 interface Env extends AuthEnv {
   FEATHERLESS_API_KEY?: string;
   FEATHERLESS_BASE_URL?: string;
@@ -44,6 +46,7 @@ const MAX_FEATHERLESS_ATTEMPTS = 3;
 const MAX_NOTE_COMPLETION_ATTEMPTS = 2;
 const NOTE_MAX_TOKENS = 4000;
 
+// Keep this strict because the UI expects this exact JSON shape, not markdown.
 const SYSTEM_PROMPT = `You are a multilingual medical scribe for clinics.
 Faithfully transform transcript text into structured clinical documentation.
 Support Vietnamese, English, and mixed-language clinic conversations.
@@ -267,6 +270,8 @@ const fetchFeatherlessJsonWithRetries = async (
   url: string,
   init: RequestInit,
 ) => {
+  // Featherless is the happy path, but a couple retries smooth over cold starts
+  // and short provider hiccups.
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= MAX_FEATHERLESS_ATTEMPTS; attempt += 1) {
@@ -408,6 +413,8 @@ const getOllamaResponseSummary = (value: unknown) => {
 };
 
 const parseModelJson = (content: string): unknown => {
+  // Providers sometimes wrap JSON in fences; pull the object out, but still fail
+  // if the final payload is not valid JSON.
   const trimmed = content
     .trim()
     .replace(/^```(?:json)?\s*/i, "")
@@ -797,6 +804,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     });
 
     try {
+      // Ollama is the fallback when the primary provider cannot finish this note.
       generatedNote = await generateWithOllama(env, trimmedTranscript);
     } catch (ollamaError) {
       const ollamaFailure = summarizeProviderFailure("ollama", ollamaError);

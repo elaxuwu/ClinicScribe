@@ -4,6 +4,8 @@ import {
   type PublicUser,
 } from "../../functions/api/auth";
 
+// Redis note storage. Supabase owns patient dashboards; this keeps generated
+// note payloads and audio previews close to the API layer.
 export type ProviderUsed = "featherless" | "ollama";
 
 export type NoteJson = {
@@ -203,6 +205,7 @@ const normalizeEncounterMetadata = (value: unknown): NoteJson["encounter"] => {
 };
 
 export const parseClinicNote = (value: unknown) => {
+  // Redis is untyped storage, so parse defensively before the UI trusts the payload.
   if (typeof value !== "string") {
     return null;
   }
@@ -292,6 +295,7 @@ export const saveClinicNote = async (
   note: NoteJson,
   recordings: NoteRecording[] = [],
 ) => {
+  // Guest notes expire; signed-in notes also get indexed into the user's vault list.
   const now = new Date().toISOString();
   const clinicNote: ClinicNote = {
     id: `note_${crypto.randomUUID()}`,
@@ -373,6 +377,7 @@ export const getPendingRecordingsForNote = async (
   userId: string,
   references: Array<{ id: string; transcript: string }>,
 ) => {
+  // Recordings are staged during transcription and attached after note generation succeeds.
   const recordings = await Promise.all(
     references.slice(0, MAX_NOTE_RECORDING_COUNT).map(async (reference) => {
       const pendingRecording = parsePendingRecording(

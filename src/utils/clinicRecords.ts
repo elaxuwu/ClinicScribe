@@ -1,5 +1,6 @@
 import { supabase } from "./supabase";
 
+// Supabase dashboard helpers for patient profiles and encounter records.
 export type PatientDraft = {
   patientProfileId?: string;
   patientId: string;
@@ -255,6 +256,7 @@ const mapEncounterDetail = (row: EncounterRow): EncounterDetail => ({
   result: getNoteJson(row.note_json),
 });
 
+// Keep the join list in one place so summary and detail screens stay in sync.
 const selectEncounterColumns = [
   "id",
   "legacy_note_id",
@@ -280,6 +282,8 @@ const upsertPatient = async (
   userId: string,
   patientDraft: PatientDraft,
 ): Promise<PatientRow> => {
+  // Reuse patients by selected profile, clinic id, or normalized name to avoid
+  // duplicate dashboard cards for the same person.
   const name = normalizeName(patientDraft.name);
   const nameKey = normalizeNameKey(name);
   const patientId = patientDraft.patientId.trim() || null;
@@ -428,6 +432,7 @@ export const saveEncounterRecord = async (input: {
   transcript: string;
   title?: string;
 }) => {
+  // Saving an encounter also refreshes the patient snapshot inside note_json for the note page.
   const user = await getCurrentUser();
   const patient = await upsertPatient(user.id, input.patientDraft);
   const noteJson = input.noteJson;

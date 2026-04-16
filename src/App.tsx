@@ -14,6 +14,8 @@ import {
 } from "./utils/clinicRecords";
 import { supabase } from "./utils/supabase";
 
+// Kept in one file for this project because the recorder, note view, dashboard,
+// and patient pages all share a lot of state.
 type TranscriptionSegment = {
   speaker?: string | number;
   speaker_id?: string | number;
@@ -147,8 +149,8 @@ type LoadRecordsOptions = {
   silent?: boolean;
 };
 type DashboardFilters = {
-  patientNames: string[];
-  patientIds: string[];
+  patientName: string;
+  patientId: string;
   genders: string[];
   ageMin: string;
   ageMax: string;
@@ -172,6 +174,7 @@ type IconName =
   | "send"
   | "x";
 
+// The API accepts these labels directly, so keep them readable for users.
 const LANGUAGE_OPTIONS = [
   "Vietnamese",
   "English",
@@ -193,6 +196,7 @@ const LANGUAGE_OPTIONS = [
 const AUTOSAVE_DELAY_MS = 600;
 const NOTE_RECORD_AUTOSAVE_DELAY_MS = 900;
 const REMOTE_SYNC_REFRESH_MS = 15000;
+const FILTER_PANEL_ANIMATION_MS = 260;
 const NOTE_CHAT_HISTORY_LIMIT = 80;
 const BRAND_LOGO_SRC = "/brand/logo.png?v=2";
 const GUEST_SESSION_KEY = "clinicscribe.guest.active";
@@ -201,8 +205,8 @@ const GUEST_RECORDS_PREFIX = "clinicscribe.guest.records";
 const GUEST_PATIENT_PROFILES_PREFIX = "clinicscribe.guest.patients";
 const GUEST_SYNC_SOURCE_KEY = "clinicscribe.guest.syncSourceId";
 const EMPTY_DASHBOARD_FILTERS: DashboardFilters = {
-  patientNames: [],
-  patientIds: [],
+  patientName: "",
+  patientId: "",
   genders: [],
   ageMin: "",
   ageMax: "",
@@ -552,8 +556,8 @@ const parseFilterNumber = (value: string) => {
 
 const getActiveDashboardFilterCount = (filters: DashboardFilters) =>
   [
-    filters.patientNames.length > 0,
-    filters.patientIds.length > 0,
+    Boolean(filters.patientName.trim()),
+    Boolean(filters.patientId.trim()),
     filters.genders.length > 0,
     Boolean(filters.ageMin.trim() || filters.ageMax.trim()),
     Boolean(filters.diagnosis.trim()),
@@ -620,6 +624,7 @@ const upsertPatientProfileList = (
   );
 
 const getSupportedMimeType = () => {
+  // Browsers disagree on MediaRecorder formats, so pick the first type this one can write.
   const types = [
     "audio/webm;codecs=opus",
     "audio/webm",
@@ -653,6 +658,7 @@ const getSpeakerLabel = (segment: TranscriptionSegment, index: number) => {
 };
 
 const formatTranscript = (result: TranscriptionResponse) => {
+  // Diarized transcripts arrive in chunks; merge adjacent chunks from the same speaker.
   if (Array.isArray(result.segments)) {
     const lines: string[] = [];
     let currentSpeaker = "";
@@ -896,6 +902,8 @@ const getActiveGuestUser = () =>
 const guestSessionPromises = new Map<string, Promise<void>>();
 
 const ensureGuestApiSession = (guestId: string) => {
+  // Guest records are local, but API calls still need a server cookie for
+  // rate limiting and auth checks.
   const existingPromise = guestSessionPromises.get(guestId);
 
   if (existingPromise) {
@@ -986,6 +994,7 @@ const apiFetch = async (
   init: RequestInit = {},
   options: { guestId?: string } = {},
 ) => {
+  // One fetch helper keeps Supabase bearer auth and guest headers consistent.
   const headers = new Headers(init.headers);
 
   if (options.guestId) {
@@ -1926,6 +1935,10 @@ function App() {
   );
   const [isDashboardFilterPanelOpen, setIsDashboardFilterPanelOpen] =
     useState(false);
+  const [isDashboardFilterPanelClosing, setIsDashboardFilterPanelClosing] =
+    useState(false);
+  const [isPatientIdFilterOpen, setIsPatientIdFilterOpen] = useState(false);
+  const [patientIdFilterSearch, setPatientIdFilterSearch] = useState("");
   const [languageSearch, setLanguageSearch] = useState("");
   const [isLanguagePickerOpen, setIsLanguagePickerOpen] = useState(false);
   const [selectedTranslationLanguage, setSelectedTranslationLanguage] =
@@ -1951,8 +1964,18 @@ function App() {
   const lastPatientRecordAutosaveSignatureRef = useRef("");
   const noteContentRef = useRef<HTMLDivElement | null>(null);
   const noteChatMessagesEndRef = useRef<HTMLDivElement | null>(null);
+  const dashboardFilterCloseTimerRef = useRef<number | null>(null);
   const isGuestMode = currentUser?.isGuest === true;
   const guestId = isGuestMode ? currentUser.id : "";
+
+  useEffect(
+    () => () => {
+      if (dashboardFilterCloseTimerRef.current !== null) {
+        window.clearTimeout(dashboardFilterCloseTimerRef.current);
+      }
+    },
+    [],
+  );
 
   const cleanupRecording = () => {
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -2254,6 +2277,7 @@ function App() {
   };
 
   const refreshSavedData = async (options: LoadRecordsOptions = {}) => {
+    // Dashboard and patient views need both notes and profiles, so refresh them together.
     const [notes] = await Promise.all([
       loadSavedNotes(options),
       loadPatientProfiles(options),
@@ -3221,6 +3245,7 @@ function App() {
   }, [currentUser]);
 
   useEffect(() => {
+    // Keep remote dashboards warm without flashing loaders every 15 seconds.
     if (
       !currentUser ||
       isGuestMode ||
@@ -3288,6 +3313,8 @@ function App() {
   }, [isNoteChatOpen, isEditingNoteWithAi, noteChatMessages]);
 
   useEffect(() => {
+    // Drafts stay session-scoped on purpose; closing the browser should clear
+    // unfinished clinic notes.
     if (!currentUser) {
       setHasHydratedAutosave(false);
       return;
@@ -3785,18 +3812,62 @@ function App() {
     );
     window.setTimeout(printPdf, 300);
   };
+  const closeDashboardFilterPanel = () => {
+    if (!isDashboardFilterPanelOpen || isDashboardFilterPanelClosing) {
+      return;
+    }
+
+    setIsPatientIdFilterOpen(false);
+    setPatientIdFilterSearch("");
+    setIsDashboardFilterPanelClosing(true);
+
+    if (dashboardFilterCloseTimerRef.current !== null) {
+      window.clearTimeout(dashboardFilterCloseTimerRef.current);
+    }
+
+    dashboardFilterCloseTimerRef.current = window.setTimeout(() => {
+      setIsDashboardFilterPanelOpen(false);
+      setIsDashboardFilterPanelClosing(false);
+      dashboardFilterCloseTimerRef.current = null;
+    }, FILTER_PANEL_ANIMATION_MS);
+  };
+  const openDashboardFilterPanel = () => {
+    if (dashboardFilterCloseTimerRef.current !== null) {
+      window.clearTimeout(dashboardFilterCloseTimerRef.current);
+      dashboardFilterCloseTimerRef.current = null;
+    }
+
+    setIsDashboardFilterPanelClosing(false);
+    setIsDashboardFilterPanelOpen(true);
+  };
+  const isDashboardFilterPanelVisible =
+    isDashboardFilterPanelOpen || isDashboardFilterPanelClosing;
+  const dashboardFilterMotionState = isDashboardFilterPanelClosing
+    ? "closing"
+    : "open";
   const dashboardSearchTerm = dashboardSearch.trim().toLowerCase();
-  const dashboardPatientNameOptions = getUniqueSortedValues(
-    savedNotes.map((savedNote) => savedNote.patientName),
-  );
   const dashboardPatientIdOptions = getUniqueSortedValues(
     savedNotes.map((savedNote) => savedNote.patientId),
   );
+  const patientIdFilterSearchTerm = normalizeFilterKey(patientIdFilterSearch);
+  const filteredDashboardPatientIdOptions = dashboardPatientIdOptions.filter(
+    (patientId) => normalizeFilterKey(patientId).includes(patientIdFilterSearchTerm),
+  );
+  const selectedDashboardPatientId =
+    dashboardPatientIdOptions.find(
+      (patientId) =>
+        normalizeFilterKey(patientId) ===
+        normalizeFilterKey(dashboardFilters.patientId),
+    ) ?? dashboardFilters.patientId.trim();
   const dashboardGenderOptions = getUniqueSortedValues(
     savedNotes.map((savedNote) => savedNote.patientGender),
   );
   const dashboardMinAge = parseFilterNumber(dashboardFilters.ageMin);
   const dashboardMaxAge = parseFilterNumber(dashboardFilters.ageMax);
+  const dashboardPatientNameFilter = normalizeFilterKey(
+    dashboardFilters.patientName,
+  );
+  const dashboardPatientIdFilter = normalizeFilterKey(dashboardFilters.patientId);
   const dashboardDiagnosisFilter = dashboardFilters.diagnosis.trim().toLowerCase();
   const activeDashboardFilterCount =
     getActiveDashboardFilterCount(dashboardFilters);
@@ -3819,11 +3890,19 @@ function App() {
         );
     })
     .filter((savedNote) => {
-      if (!selectionIncludes(dashboardFilters.patientNames, savedNote.patientName)) {
+      if (
+        dashboardPatientNameFilter &&
+        !normalizeFilterKey(savedNote.patientName).includes(
+          dashboardPatientNameFilter,
+        )
+      ) {
         return false;
       }
 
-      if (!selectionIncludes(dashboardFilters.patientIds, savedNote.patientId)) {
+      if (
+        dashboardPatientIdFilter &&
+        normalizeFilterKey(savedNote.patientId) !== dashboardPatientIdFilter
+      ) {
         return false;
       }
 
@@ -4092,8 +4171,8 @@ function App() {
                 </label>
 
                 <button
-                  className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-zinc-300 px-4 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
-                  onClick={() => setIsDashboardFilterPanelOpen(true)}
+                  className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-zinc-300 px-4 text-sm font-semibold text-zinc-700 transition hover:-translate-y-0.5 hover:border-zinc-400 hover:bg-zinc-50 active:scale-95"
+                  onClick={openDashboardFilterPanel}
                   type="button"
                 >
                   <Icon name="filter" />
@@ -4106,16 +4185,20 @@ function App() {
                 </button>
               </div>
 
-              {isDashboardFilterPanelOpen ? (
+              {isDashboardFilterPanelVisible ? (
                 <div className="fixed inset-0 z-40">
                   <button
                     aria-label="Close filters"
-                    className="absolute inset-0 bg-zinc-950/30"
-                    onClick={() => setIsDashboardFilterPanelOpen(false)}
+                    className="motion-filter-backdrop absolute inset-0 bg-zinc-950/30"
+                    data-state={dashboardFilterMotionState}
+                    onClick={closeDashboardFilterPanel}
                     type="button"
                   />
 
-                  <aside className="absolute right-0 top-0 flex h-full w-full max-w-md flex-col border-l border-zinc-200 bg-white shadow-2xl">
+                  <aside
+                    className="motion-filter-panel absolute right-0 top-0 flex h-full w-full max-w-md flex-col border-l border-zinc-200 bg-white shadow-2xl"
+                    data-state={dashboardFilterMotionState}
+                  >
                     <div className="flex items-start justify-between gap-4 border-b border-zinc-200 px-5 py-4">
                       <div>
                         <h2 className="text-lg font-semibold text-zinc-950">
@@ -4128,88 +4211,127 @@ function App() {
                       <IconButton
                         icon="x"
                         label="Close filters"
-                        onClick={() => setIsDashboardFilterPanelOpen(false)}
+                        onClick={closeDashboardFilterPanel}
                       />
                     </div>
 
                     <div className="min-h-0 flex-1 space-y-6 overflow-y-auto px-5 py-5">
                       <section>
-                        <h3 className="text-sm font-semibold text-zinc-900">
+                        <label className="block text-sm font-semibold text-zinc-900">
                           Patient name
-                        </h3>
-                        <div className="mt-3 max-h-40 space-y-2 overflow-y-auto rounded-lg border border-zinc-200 p-3">
-                          {dashboardPatientNameOptions.length > 0 ? (
-                            dashboardPatientNameOptions.map((patientName) => (
-                              <label
-                                className="flex items-center gap-2 text-sm text-zinc-700"
-                                key={patientName}
-                              >
-                                <input
-                                  checked={dashboardFilters.patientNames.some(
-                                    (selectedName) =>
-                                      normalizeFilterKey(selectedName) ===
-                                      normalizeFilterKey(patientName),
-                                  )}
-                                  className="h-4 w-4 rounded border-zinc-300 text-zinc-950 focus:ring-zinc-400"
-                                  onChange={() =>
-                                    setDashboardFilters((current) => ({
-                                      ...current,
-                                      patientNames: toggleFilterValue(
-                                        current.patientNames,
-                                        patientName,
-                                      ),
-                                    }))
-                                  }
-                                  type="checkbox"
-                                />
-                                <span>{patientName}</span>
-                              </label>
-                            ))
-                          ) : (
-                            <p className="text-sm text-zinc-500">
-                              No saved patient names yet.
-                            </p>
-                          )}
-                        </div>
+                          <input
+                            className="mt-3 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-zinc-950 outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100"
+                            onChange={(event) =>
+                              setDashboardFilters((current) => ({
+                                ...current,
+                                patientName: event.target.value,
+                              }))
+                            }
+                            placeholder="Search by name..."
+                            type="text"
+                            value={dashboardFilters.patientName}
+                          />
+                        </label>
                       </section>
 
                       <section>
                         <h3 className="text-sm font-semibold text-zinc-900">
                           Patient ID
                         </h3>
-                        <div className="mt-3 max-h-40 space-y-2 overflow-y-auto rounded-lg border border-zinc-200 p-3">
-                          {dashboardPatientIdOptions.length > 0 ? (
-                            dashboardPatientIdOptions.map((patientId) => (
-                              <label
-                                className="flex items-center gap-2 text-sm text-zinc-700"
-                                key={patientId}
-                              >
+                        <div className="relative mt-3">
+                          <button
+                            aria-expanded={isPatientIdFilterOpen}
+                            aria-haspopup="listbox"
+                            className="flex w-full items-center justify-between gap-3 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-left text-sm text-zinc-950 transition hover:border-zinc-300 hover:bg-white focus:border-zinc-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-zinc-100"
+                            disabled={dashboardPatientIdOptions.length === 0}
+                            onClick={() => {
+                              setIsPatientIdFilterOpen((current) => !current);
+                              setPatientIdFilterSearch("");
+                            }}
+                            type="button"
+                          >
+                            <span className="truncate">
+                              {selectedDashboardPatientId || "Choose Patient ID"}
+                            </span>
+                            <span className="text-xs text-zinc-500" aria-hidden="true">
+                              {isPatientIdFilterOpen ? "Close" : "Open"}
+                            </span>
+                          </button>
+
+                          {isPatientIdFilterOpen && dashboardPatientIdOptions.length > 0 ? (
+                            <div className="motion-dropdown absolute left-0 right-0 top-full z-10 mt-2 rounded-lg border border-zinc-200 bg-white p-3 shadow-xl">
+                              <label className="block text-xs font-semibold text-zinc-600">
+                                Search IDs
                                 <input
-                                  checked={dashboardFilters.patientIds.some(
-                                    (selectedId) =>
-                                      normalizeFilterKey(selectedId) ===
-                                      normalizeFilterKey(patientId),
-                                  )}
-                                  className="h-4 w-4 rounded border-zinc-300 text-zinc-950 focus:ring-zinc-400"
-                                  onChange={() =>
+                                  className="mt-2 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-950 outline-none transition focus:border-zinc-400 focus:bg-white focus:ring-4 focus:ring-zinc-100"
+                                  onChange={(event) =>
+                                    setPatientIdFilterSearch(event.target.value)
+                                  }
+                                  placeholder="Type an ID..."
+                                  type="text"
+                                  value={patientIdFilterSearch}
+                                />
+                              </label>
+
+                              <div className="mt-3 max-h-44 overflow-y-auto" role="listbox">
+                                {filteredDashboardPatientIdOptions.length > 0 ? (
+                                  filteredDashboardPatientIdOptions.map((patientId) => (
+                                    <button
+                                      className={`block w-full rounded-lg px-3 py-2 text-left text-sm transition ${
+                                        normalizeFilterKey(dashboardFilters.patientId) ===
+                                        normalizeFilterKey(patientId)
+                                          ? "bg-zinc-100 font-semibold text-zinc-950"
+                                          : "text-zinc-700 hover:bg-zinc-50"
+                                      }`}
+                                      key={patientId}
+                                      onClick={() => {
+                                        setDashboardFilters((current) => ({
+                                          ...current,
+                                          patientId,
+                                        }));
+                                        setIsPatientIdFilterOpen(false);
+                                        setPatientIdFilterSearch("");
+                                      }}
+                                      role="option"
+                                      aria-selected={
+                                        normalizeFilterKey(dashboardFilters.patientId) ===
+                                        normalizeFilterKey(patientId)
+                                      }
+                                      type="button"
+                                    >
+                                      {patientId}
+                                    </button>
+                                  ))
+                                ) : (
+                                  <p className="px-3 py-2 text-sm text-zinc-500">
+                                    No matching patient IDs.
+                                  </p>
+                                )}
+                              </div>
+
+                              {dashboardFilters.patientId ? (
+                                <button
+                                  className="mt-3 rounded-lg border border-zinc-300 px-3 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
+                                  onClick={() => {
                                     setDashboardFilters((current) => ({
                                       ...current,
-                                      patientIds: toggleFilterValue(
-                                        current.patientIds,
-                                        patientId,
-                                      ),
-                                    }))
-                                  }
-                                  type="checkbox"
-                                />
-                                <span>{patientId}</span>
-                              </label>
-                            ))
-                          ) : (
-                            <p className="text-sm text-zinc-500">
+                                      patientId: "",
+                                    }));
+                                    setPatientIdFilterSearch("");
+                                  }}
+                                  type="button"
+                                >
+                                  Clear Patient ID
+                                </button>
+                              ) : null}
+                            </div>
+                          ) : null}
+
+                          {dashboardPatientIdOptions.length === 0 ? (
+                            <p className="mt-2 text-sm text-zinc-500">
                               Add a Patient ID to a record to filter by it.
                             </p>
-                          )}
+                          ) : null}
                         </div>
                       </section>
 
@@ -4352,16 +4474,18 @@ function App() {
                       <button
                         className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:text-zinc-400"
                         disabled={activeDashboardFilterCount === 0}
-                        onClick={() =>
-                          setDashboardFilters(EMPTY_DASHBOARD_FILTERS)
-                        }
+                        onClick={() => {
+                          setDashboardFilters(EMPTY_DASHBOARD_FILTERS);
+                          setIsPatientIdFilterOpen(false);
+                          setPatientIdFilterSearch("");
+                        }}
                         type="button"
                       >
                         Clear filters
                       </button>
                       <button
                         className="rounded-lg bg-zinc-950 px-4 py-2 text-sm font-semibold text-white transition hover:bg-zinc-800"
-                        onClick={() => setIsDashboardFilterPanelOpen(false)}
+                        onClick={closeDashboardFilterPanel}
                         type="button"
                       >
                         Done
@@ -4380,7 +4504,7 @@ function App() {
 
                 {visibleSavedNotes.map((savedNote) => (
                   <div
-                    className="rounded-xl border border-zinc-200 bg-white px-4 py-3 transition hover:border-zinc-400 hover:bg-zinc-50"
+                    className="motion-card rounded-xl border border-zinc-200 bg-white px-4 py-3 hover:border-zinc-400 hover:bg-zinc-50"
                     key={savedNote.id}
                   >
                     <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -4553,7 +4677,7 @@ function App() {
                       {selectedPatientProfileNotes.length > 0 ? (
                         selectedPatientProfileNotes.map((savedNote) => (
                           <div
-                            className="rounded-xl border border-zinc-200 bg-white px-4 py-3 transition hover:border-zinc-400 hover:bg-zinc-50"
+                            className="motion-card rounded-xl border border-zinc-200 bg-white px-4 py-3 hover:border-zinc-400 hover:bg-zinc-50"
                             key={savedNote.id}
                           >
                             <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -4728,7 +4852,7 @@ function App() {
               onMouseUp={updateSelectedNoteText}
               ref={noteContentRef}
             >
-              <section className="rounded-2xl border border-zinc-200 p-5">
+              <section className="motion-card rounded-2xl border border-zinc-200 p-5">
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                   <div>
                     <p className="text-sm font-semibold text-zinc-500">
@@ -4765,7 +4889,7 @@ function App() {
                         </button>
 
                         {isLanguagePickerOpen ? (
-                          <div className="absolute right-0 z-10 mt-2 w-64 rounded-xl border border-zinc-200 bg-white p-3 shadow-lg">
+                          <div className="motion-dropdown absolute right-0 z-10 mt-2 w-64 rounded-xl border border-zinc-200 bg-white p-3 shadow-lg">
                             <input
                               className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm outline-none transition disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400 focus:border-zinc-400 focus:bg-white"
                               disabled={isTranslating}
@@ -4847,7 +4971,7 @@ function App() {
                 ) : null}
               </section>
 
-              <section className="rounded-2xl border border-zinc-200 p-5">
+              <section className="motion-card rounded-2xl border border-zinc-200 p-5">
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                   <div>
                     <h3 className="text-lg font-semibold text-zinc-950">
@@ -5074,7 +5198,7 @@ function App() {
                 </details>
               ) : null}
 
-              <section className="rounded-2xl border border-zinc-200 p-5">
+              <section className="motion-card rounded-2xl border border-zinc-200 p-5">
                 <h3 className="mb-4 text-lg font-semibold text-zinc-950">SOAP</h3>
 
                 <div className="grid gap-4 md:grid-cols-2">
@@ -5097,14 +5221,14 @@ function App() {
                 </div>
               </section>
 
-              <section className="rounded-2xl border border-zinc-200 p-5">
+              <section className="motion-card rounded-2xl border border-zinc-200 p-5">
                 <h3 className="text-lg font-semibold text-zinc-950">Visit Summary</h3>
                 <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-zinc-700">
                   {asText(noteResult.visit_summary)}
                 </p>
               </section>
 
-              <section className="rounded-2xl border border-zinc-200 p-5">
+              <section className="motion-card rounded-2xl border border-zinc-200 p-5">
                 <h3 className="text-lg font-semibold text-zinc-950">Extracted Data</h3>
                 <div className="mt-4 grid gap-4 md:grid-cols-2">
                   <div>
@@ -5134,7 +5258,7 @@ function App() {
                 </div>
               </section>
 
-              <section className="rounded-2xl border border-zinc-200 p-5">
+              <section className="motion-card rounded-2xl border border-zinc-200 p-5">
                 <h3 className="text-lg font-semibold text-zinc-950">
                   Discharge Instructions
                 </h3>
@@ -5156,12 +5280,9 @@ function App() {
         <>
           <aside
             aria-hidden={!isNoteChatOpen}
+            data-state={isNoteChatOpen ? "open" : "closed"}
             inert={!isNoteChatOpen ? true : undefined}
-            className={`fixed bottom-20 left-4 z-30 flex h-[min(82vh,44rem)] max-h-[calc(100vh-6rem)] w-[calc(100vw-2rem)] max-w-lg origin-bottom-left flex-col rounded-2xl border border-zinc-200 bg-white shadow-xl transition-all duration-200 ease-out motion-reduce:transform-none motion-reduce:transition-none sm:left-6 ${
-              isNoteChatOpen
-                ? "translate-y-0 scale-100 opacity-100"
-                : "pointer-events-none translate-y-4 scale-95 opacity-0"
-            }`}
+            className="motion-chatbox fixed bottom-20 left-4 z-30 flex h-[min(82vh,44rem)] max-h-[calc(100vh-6rem)] w-[calc(100vw-2rem)] max-w-lg flex-col rounded-2xl border border-zinc-200 bg-white shadow-xl sm:left-6"
           >
               <div className="flex items-start justify-between gap-3 border-b border-zinc-200 px-4 py-3">
                 <div>
@@ -5195,7 +5316,7 @@ function App() {
                 {noteChatMessages.length > 0 ? (
                   noteChatMessages.map((message) => (
                     <div
-                      className={`flex ${
+                      className={`motion-chat-message flex ${
                         message.role === "user" ? "justify-end" : "justify-start"
                       }`}
                       key={message.id}
@@ -5223,7 +5344,9 @@ function App() {
                 )}
 
                 {isEditingNoteWithAi ? (
-                  <p className="text-sm text-zinc-500">Editing note...</p>
+                  <p className="motion-pulse-soft text-sm text-zinc-500">
+                    Editing note...
+                  </p>
                 ) : null}
                 <div ref={noteChatMessagesEndRef} />
               </div>
@@ -5287,7 +5410,7 @@ function App() {
 
           <button
             aria-label="Open ClinicScribe AI chat"
-            className="fixed bottom-5 left-4 z-30 inline-flex h-12 w-12 items-center justify-center rounded-lg border border-zinc-300 bg-white text-zinc-800 shadow-lg transition hover:border-zinc-400 hover:bg-zinc-50 sm:left-6"
+            className="fixed bottom-5 left-4 z-30 inline-flex h-12 w-12 items-center justify-center rounded-lg border border-zinc-300 bg-white text-zinc-800 shadow-lg transition hover:-translate-y-0.5 hover:border-zinc-400 hover:bg-zinc-50 active:scale-95 sm:left-6"
             onClick={() => {
               setIsNoteChatOpen((current) => !current);
               setNoteChatError("");

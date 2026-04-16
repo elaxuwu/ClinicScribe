@@ -8,6 +8,7 @@ import {
   toNoteResponse,
 } from "../../src/server/note-store";
 
+// Small CRUD wrapper around the Redis-backed note vault.
 const jsonHeaders = {
   "Content-Type": "application/json",
   "Cache-Control": "no-store",
@@ -36,6 +37,7 @@ export const onRequestGet: PagesFunction<AuthEnv> = async ({ request, env }) => 
   const noteId = url.searchParams.get("id")?.trim();
 
   if (noteId) {
+    // With an id, return the full note. Without one, this same endpoint lists the vault.
     let note: Awaited<ReturnType<typeof getClinicNote>>;
 
     try {
@@ -140,6 +142,8 @@ export const onRequestPatch: PagesFunction<AuthEnv> = async ({ request, env }) =
     );
   }
 
+  // PATCH is intentionally narrow: title and pin state are the only vault
+  // metadata edited here.
   const nextPinned =
     typeof record.pinned === "boolean" ? record.pinned : note.pinned;
   const now = new Date().toISOString();

@@ -8,6 +8,7 @@ import {
   type ProviderUsed,
 } from "../../src/server/note-store";
 
+// Translates note JSON while preserving the clinical shape the note view already understands.
 interface Env extends AuthEnv {
   FEATHERLESS_API_KEY?: string;
   FEATHERLESS_BASE_URL?: string;
@@ -40,6 +41,7 @@ const CHAT_COMPLETIONS_PATH = "/chat/completions";
 const OLLAMA_CHAT_URL = "https://ollama.com/api/chat";
 const NOTE_MAX_TOKENS = 4000;
 
+// Translation should change wording, not the schema or the facts.
 const TRANSLATION_SYSTEM_PROMPT = `You translate clinical documentation for clinicians and patients.
 Translate every user-facing value into the requested language.
 Preserve the exact JSON schema, array structure, medical meaning, medication names, dosages, numbers, and clinical uncertainty.
@@ -547,6 +549,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   const language =
     typeof record.language === "string" ? record.language.trim() : "";
   const force = record.force === true;
+  // Guest notes live in the browser, so they send the source note instead of a server id.
   const inlineGuestNote = authResult.isGuest ? asRecord(record.note) : null;
 
   if (!noteId && !inlineGuestNote) {
@@ -619,6 +622,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   }
 
   const languageKey = normalizeLanguageKey(language);
+  // Signed-in notes can reuse saved translations unless the UI requests a fresh one.
   const cachedTranslation = note.translations[languageKey];
 
   if (cachedTranslation && !force) {

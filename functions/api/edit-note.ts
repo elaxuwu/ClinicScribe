@@ -1,6 +1,8 @@
 import { requireAuthenticatedUser, type AuthEnv } from "./auth";
 import { type NoteJson, type ProviderUsed } from "../../src/server/note-store";
 
+// Chat/edit endpoint for an existing note. It can answer a question or return a
+// rewritten note JSON, depending on what the clinician asks.
 interface Env extends AuthEnv {
   FEATHERLESS_API_KEY?: string;
   FEATHERLESS_BASE_URL?: string;
@@ -36,6 +38,7 @@ const MAX_MESSAGE_CHARS = 5000;
 const MAX_SELECTED_TEXT_CHARS = 8000;
 const MAX_CHAT_HISTORY_MESSAGES = 12;
 
+// The response envelope stays small so chat text and note updates land together.
 const EDIT_SYSTEM_PROMPT = `You are ClinicScribe AI, a friendly clinical note assistant for clinicians.
 You can both chat about the note and edit the supplied clinical note JSON.
 If the clinician asks a greeting, question, explanation, or other conversational request, answer naturally in assistant_message and return the note unchanged.
@@ -400,6 +403,7 @@ const hasNoteChanged = (
   JSON.stringify(getComparableNotePayload(sourceNote, providerUsed)) !==
   JSON.stringify(getComparableNotePayload(modelNote, providerUsed));
 
+// Keep enough context to feel continuous without letting chat history crowd out the note.
 const normalizeHistoryMessages = (value: unknown): ChatMessage[] =>
   Array.isArray(value)
     ? value
@@ -469,6 +473,7 @@ const extractEditResult = (
   providerUsed: ProviderUsed,
   sourceNote: Record<string, unknown>,
 ) => {
+  // Compare normalized payloads instead of trusting the model's own changed flag.
   const parsed = asRecord(parseModelJson(modelContent));
   const modelNote = asRecord(parsed?.note);
 

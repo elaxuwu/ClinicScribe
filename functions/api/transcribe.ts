@@ -1,6 +1,8 @@
 import { requireAuthenticatedUser, type AuthEnv } from "./auth";
 import { savePendingRecording } from "../../src/server/note-store";
 
+// This endpoint brokers audio to the transcription proxy. The browser never
+// talks to the upstream transcription service directly.
 interface Env extends AuthEnv {
   PROXY_BASE_URL?: string;
   TRANSCRIPTION_MODEL?: string;
@@ -10,6 +12,7 @@ interface Env extends AuthEnv {
 const TRANSCRIPTION_MODEL_ENV = "TRANSCRIPTION_MODEL";
 const DIARIZED_TRANSCRIPTION_MODEL = "gpt-4o-transcribe-diarize";
 const TRANSCRIPTIONS_PATH = "/v1/audio/transcriptions";
+// Leave a little room for multipart overhead before the function buffers form data.
 const MAX_AUDIO_UPLOAD_BYTES = 25 * 1024 * 1024;
 const MAX_MULTIPART_UPLOAD_BYTES = MAX_AUDIO_UPLOAD_BYTES + 1024 * 1024;
 const ALLOWED_AUDIO_TYPES = new Set([
@@ -34,6 +37,7 @@ const jsonResponse = (body: unknown, init?: ResponseInit) =>
     },
   });
 
+// MediaRecorder often appends codec params; the allow-list only needs the base type.
 const getNormalizedMediaType = (type: string) =>
   type.split(";")[0]?.trim().toLowerCase() ?? "";
 
@@ -128,6 +132,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   proxyFormData.set("model", transcriptionModel);
 
   if (transcriptionModel === DIARIZED_TRANSCRIPTION_MODEL) {
+    // The diarized model needs this response format so speaker turns survive.
     proxyFormData.set("response_format", "diarized_json");
   }
 

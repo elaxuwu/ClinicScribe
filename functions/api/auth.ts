@@ -1,3 +1,5 @@
+// Cloudflare Functions keep auth deliberately small: Supabase bearer tokens for
+// real accounts, Redis cookies for the local/demo account flow.
 export type AuthEnv = {
   UPSTASH_DATABASE_URL?: string;
   UPSTASH_DATABASE_KEY?: string;
@@ -59,6 +61,8 @@ const jsonHeaders = {
 };
 
 const makeJsonHeaders = (headersInit?: HeadersInit) => {
+  // Some responses set cookies, so preserve real Headers objects instead of
+  // flattening everything into a plain object.
   const headers =
     headersInit instanceof Headers ? headersInit : new Headers(headersInit);
 
@@ -380,6 +384,8 @@ const enforceRateLimit = async (
   limit: number,
   windowSeconds: number,
 ) => {
+  // Cheap Redis counter. Good enough for guest/demo limits without another
+  // service in the middle.
   const identifierHash = await sha256(identifier);
   const key = getRateLimitKey(scope, identifierHash);
   const result = await redisCommand(env, ["INCR", key]);
@@ -407,6 +413,8 @@ const getGuestUser = async (
   request: Request,
   env: AuthEnv,
 ): Promise<PublicUser | null> => {
+  // The guest header names the local browser profile; the cookie proves this
+  // browser actually opened a guest session.
   const guestId = getGuestId(request);
 
   if (!guestId) {
@@ -710,6 +718,8 @@ const destroyGuestSession = async (request: Request, env: AuthEnv) => {
 };
 
 const getAuthenticatedUser = async (request: Request, env: AuthEnv) => {
+  // Order matters: guest cookie, Supabase bearer token, then the older
+  // Redis-backed email/password session.
   const guestUser = await getGuestUser(request, env);
 
   if (guestUser) {

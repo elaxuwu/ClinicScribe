@@ -2,6 +2,7 @@
 
 create extension if not exists pgcrypto;
 
+-- Patient names get a normalized key so repeated visits can land on one profile.
 create table if not exists public.patients (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
@@ -53,6 +54,7 @@ create index if not exists encounters_patient_updated_idx
 alter table public.patients enable row level security;
 alter table public.encounters enable row level security;
 
+-- RLS mirrors the client filters, but the database still enforces ownership.
 drop policy if exists "Users can read their own patients" on public.patients;
 create policy "Users can read their own patients"
   on public.patients
@@ -85,6 +87,7 @@ create policy "Users can read their own encounters"
   using (auth.uid() = user_id);
 
 drop policy if exists "Users can create their own encounters" on public.encounters;
+-- Encounters must point at a patient owned by the same account.
 create policy "Users can create their own encounters"
   on public.encounters
   for insert
