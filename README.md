@@ -17,7 +17,9 @@ It also keeps a lightweight patient dashboard so notes are not just floating aro
 - 🌍 Translates notes into other languages
 - 💬 Lets you chat with ClinicScribe AI to ask questions or request note edits
 - 📌 Saves, pins, filters, and deletes patient encounters
+- 🔎 Searches dashboard records by patient name, and filters Patient IDs with a searchable dropdown
 - 🔄 Keeps signed-in dashboards fresh while you are on patient or dashboard pages
+- ✨ Uses lightweight UI motion for the chatbox, filter drawer, dropdowns, and cards
 - 🧯 Checks audio size and file type before sending it to the transcription service (for security)
 - 👤 Supports signed-in users through Supabase
 - 🚪 Supports guest mode with local browser records and a short-lived server session
@@ -113,6 +115,22 @@ OLLAMA_MODEL=your-ollama-model
 ```
 
 The transcription endpoint currently accepts common browser audio formats like WebM, MP4, MP3/MPEG, OGG, and WAV. Audio files are capped at 25 MB so the app does not try to push giant recordings through the proxy and then quietly explode. Very rude when apps do that.
+
+## Dashboard Notes 🔎
+
+The dashboard is built for quick cleanup after a clinic visit:
+
+- search across patient name, Patient ID, diagnosis, note title, and language
+- filter patient names by typing instead of clicking through a giant checkbox list
+- pick Patient IDs from a dropdown with its own search box
+- filter by gender, age range, diagnosis text, and visit date
+- pin important encounters so they stay at the top
+
+## UI Motion ✨
+
+ClinicScribe uses small CSS transitions to make the app feel less stiff without turning it into a fireworks show. The note chatbox fades/slides open, the filter panel slides in and out, dropdowns pop in softly, and cards get a tiny hover lift.
+
+The motion is kept CSS-first so it works cleanly on Cloudflare Pages, and it respects `prefers-reduced-motion` for people who would rather keep things still.
 
 ## Supabase Setup 🧱
 
