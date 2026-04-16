@@ -2808,7 +2808,7 @@ function App() {
               Continue as guest
             </button>
             <p className="mt-3 text-xs leading-5 text-zinc-500">
-              Guest records stay in this browser. Create an account to sync them.
+              Guest records stay in this browser. Create an account to sync!
             </p>
           </div>
         </section>
