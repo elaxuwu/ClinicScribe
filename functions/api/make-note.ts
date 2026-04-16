@@ -35,8 +35,6 @@ type ProviderFailure = {
   message: string;
   kind?: ProviderErrorKind;
   status?: number;
-  details?: unknown;
-  body_preview?: string;
 };
 
 const CHAT_COMPLETIONS_PATH = "/chat/completions";
@@ -712,8 +710,6 @@ const summarizeProviderFailure = (
       message: error.message,
       kind: error.kind,
       status: error.status,
-      details: error.details,
-      body_preview: error.bodyPreview,
     };
   }
 
@@ -811,7 +807,6 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
         {
           error:
             "Unable to generate note. Featherless primary and Ollama Cloud fallback both failed.",
-          failures: [featherlessFailure, ollamaFailure],
         },
         { status: 502 },
       );

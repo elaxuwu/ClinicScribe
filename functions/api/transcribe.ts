@@ -10,6 +10,16 @@ interface Env extends AuthEnv {
 const TRANSCRIPTION_MODEL_ENV = "TRANSCRIPTION_MODEL";
 const DIARIZED_TRANSCRIPTION_MODEL = "gpt-4o-transcribe-diarize";
 const TRANSCRIPTIONS_PATH = "/v1/audio/transcriptions";
+const MAX_AUDIO_UPLOAD_BYTES = 25 * 1024 * 1024;
+const MAX_MULTIPART_UPLOAD_BYTES = MAX_AUDIO_UPLOAD_BYTES + 1024 * 1024;
+const ALLOWED_AUDIO_TYPES = new Set([
+  "audio/mp4",
+  "audio/mpeg",
+  "audio/ogg",
+  "audio/wav",
+  "audio/webm",
+  "audio/x-wav",
+]);
 
 const jsonHeaders = {
   "Content-Type": "application/json",
@@ -23,6 +33,9 @@ const jsonResponse = (body: unknown, init?: ResponseInit) =>
       ...init?.headers,
     },
   });
+
+const getNormalizedMediaType = (type: string) =>
+  type.split(";")[0]?.trim().toLowerCase() ?? "";
 
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   const authResult = await requireAuthenticatedUser(request, env);
@@ -57,6 +70,21 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     );
   }
 
+  const contentLengthHeader = request.headers.get("content-length");
+  const contentLength = contentLengthHeader
+    ? Number.parseInt(contentLengthHeader, 10)
+    : Number.NaN;
+
+  if (
+    Number.isFinite(contentLength) &&
+    contentLength > MAX_MULTIPART_UPLOAD_BYTES
+  ) {
+    return jsonResponse(
+      { error: "Audio upload is too large." },
+      { status: 413 },
+    );
+  }
+
   let requestFormData: FormData;
 
   try {
@@ -74,6 +102,20 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     return jsonResponse(
       { error: "A non-empty audio file field named 'audio' is required." },
       { status: 400 },
+    );
+  }
+
+  if (audio.size > MAX_AUDIO_UPLOAD_BYTES) {
+    return jsonResponse(
+      { error: "Audio file must be 25 MB or smaller." },
+      { status: 413 },
+    );
+  }
+
+  if (!ALLOWED_AUDIO_TYPES.has(getNormalizedMediaType(audio.type))) {
+    return jsonResponse(
+      { error: "Audio file type is not supported." },
+      { status: 415 },
     );
   }
 
@@ -110,8 +152,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     } catch {
       return jsonResponse(
         {
-          error: "Transcription proxy returned a non-JSON response.",
-          details: upstreamText.slice(0, 500),
+          error: "Transcription proxy returned an invalid response.",
         },
         { status: 502 },
       );
@@ -122,7 +163,6 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
         {
           error: "Transcription proxy request failed.",
           status: upstreamResponse.status,
-          details: upstreamJson,
         },
         { status: upstreamResponse.status },
       );
@@ -136,7 +176,6 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
       return jsonResponse(
         {
           error: "Unable to save recorded audio.",
-          details: error instanceof Error ? error.message : "Unknown error",
         },
         { status: 500 },
       );
@@ -154,7 +193,6 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     return jsonResponse(
       {
         error: "Unable to reach transcription proxy.",
-        details: error instanceof Error ? error.message : "Unknown error",
       },
       { status: 502 },
     );

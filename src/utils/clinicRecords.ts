@@ -361,10 +361,12 @@ const upsertPatient = async (
   return data as PatientRow;
 };
 
-const getEncounterById = async (encounterId: string) => {
+const getEncounterById = async (encounterId: string, userId?: string) => {
+  const user = userId ? { id: userId } : await getCurrentUser();
   const { data, error } = await supabase
     .from("encounters")
     .select(selectEncounterColumns)
+    .eq("user_id", user.id)
     .eq("id", encounterId)
     .single();
 
@@ -374,9 +376,11 @@ const getEncounterById = async (encounterId: string) => {
 };
 
 export const listEncounterSummaries = async () => {
+  const user = await getCurrentUser();
   const { data, error } = await supabase
     .from("encounters")
     .select(selectEncounterColumns)
+    .eq("user_id", user.id)
     .order("pinned", { ascending: false })
     .order("updated_at", { ascending: false });
 
@@ -473,13 +477,16 @@ export const saveEncounterRecord = async (input: {
     const { data, error } = await supabase
       .from("encounters")
       .update(payload)
+      .eq("user_id", user.id)
       .eq("id", input.encounterId)
       .select("id")
       .single();
 
     throwIfSupabaseError(error, "Unable to update encounter");
 
-    return mapEncounterDetail(await getEncounterById((data as { id: string }).id));
+    return mapEncounterDetail(
+      await getEncounterById((data as { id: string }).id, user.id),
+    );
   }
 
   const { data, error } = await supabase
@@ -490,13 +497,16 @@ export const saveEncounterRecord = async (input: {
 
   throwIfSupabaseError(error, "Unable to save encounter");
 
-  return mapEncounterDetail(await getEncounterById((data as { id: string }).id));
+  return mapEncounterDetail(
+    await getEncounterById((data as { id: string }).id, user.id),
+  );
 };
 
 export const updateEncounterSummary = async (
   encounterId: string,
   updates: { title?: string; pinned?: boolean },
 ) => {
+  const user = await getCurrentUser();
   const patch: Record<string, unknown> = {
     updated_at: new Date().toISOString(),
   };
@@ -513,17 +523,25 @@ export const updateEncounterSummary = async (
   const { data, error } = await supabase
     .from("encounters")
     .update(patch)
+    .eq("user_id", user.id)
     .eq("id", encounterId)
     .select("id")
     .single();
 
   throwIfSupabaseError(error, "Unable to update dashboard record");
 
-  return mapEncounterSummary(await getEncounterById((data as { id: string }).id));
+  return mapEncounterSummary(
+    await getEncounterById((data as { id: string }).id, user.id),
+  );
 };
 
 export const deleteEncounterRecord = async (encounterId: string) => {
-  const { error } = await supabase.from("encounters").delete().eq("id", encounterId);
+  const user = await getCurrentUser();
+  const { error } = await supabase
+    .from("encounters")
+    .delete()
+    .eq("user_id", user.id)
+    .eq("id", encounterId);
 
   throwIfSupabaseError(error, "Unable to delete dashboard record");
 };

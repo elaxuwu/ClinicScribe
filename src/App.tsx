@@ -143,6 +143,9 @@ type EditNoteResponse = {
 };
 
 type DashboardSort = "newest" | "oldest" | "patient";
+type LoadRecordsOptions = {
+  silent?: boolean;
+};
 type DashboardFilters = {
   patientNames: string[];
   patientIds: string[];
@@ -189,6 +192,7 @@ const LANGUAGE_OPTIONS = [
 
 const AUTOSAVE_DELAY_MS = 600;
 const NOTE_RECORD_AUTOSAVE_DELAY_MS = 900;
+const REMOTE_SYNC_REFRESH_MS = 15000;
 const NOTE_CHAT_HISTORY_LIMIT = 80;
 const BRAND_LOGO_SRC = "/brand/logo.png?v=2";
 const GUEST_SESSION_KEY = "clinicscribe.guest.active";
@@ -253,7 +257,7 @@ const clearAutosavedDraft = (user: CurrentUser | null) => {
     return;
   }
 
-  localStorage.removeItem(getAutosaveKey(user.id));
+  sessionStorage.removeItem(getAutosaveKey(user.id));
 };
 
 const getAutosaveTimeLabel = () =>
@@ -851,10 +855,15 @@ const toCurrentUser = (user: User): CurrentUser => {
   };
 };
 
+const isGuestId = (value: string) =>
+  /^guest_[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value,
+  );
+
 const getOrCreateGuestId = () => {
   const existingGuestId = localStorage.getItem(GUEST_ID_KEY);
 
-  if (existingGuestId) {
+  if (existingGuestId && isGuestId(existingGuestId)) {
     return existingGuestId;
   }
 
@@ -883,6 +892,71 @@ const setGuestModeActive = (isActive: boolean) => {
 
 const getActiveGuestUser = () =>
   localStorage.getItem(GUEST_SESSION_KEY) === "true" ? makeGuestUser() : null;
+
+const guestSessionPromises = new Map<string, Promise<void>>();
+
+const ensureGuestApiSession = (guestId: string) => {
+  const existingPromise = guestSessionPromises.get(guestId);
+
+  if (existingPromise) {
+    return existingPromise;
+  }
+
+  const promise = fetch("/api/auth", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    credentials: "same-origin",
+    body: JSON.stringify({
+      action: "guest",
+      guestId,
+    }),
+  })
+    .then(async (response) => {
+      if (response.ok) {
+        return;
+      }
+
+      let message = "Unable to start guest mode.";
+
+      try {
+        const payload = (await response.json()) as { error?: unknown };
+
+        if (typeof payload.error === "string" && payload.error.trim()) {
+          message = payload.error;
+        }
+      } catch {
+        // Keep the generic message when the auth endpoint cannot return JSON.
+      }
+
+      throw new Error(message);
+    })
+    .catch((error) => {
+      guestSessionPromises.delete(guestId);
+      throw error;
+    });
+
+  guestSessionPromises.set(guestId, promise);
+  return promise;
+};
+
+const clearGuestApiSession = async () => {
+  guestSessionPromises.clear();
+
+  try {
+    await fetch("/api/auth", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      credentials: "same-origin",
+      body: JSON.stringify({ action: "logout" }),
+    });
+  } catch {
+    // Local guest records are still cleared even if the server cookie is gone.
+  }
+};
 
 const setPendingGuestSync = (guestId: string) => {
   sessionStorage.setItem(GUEST_SYNC_SOURCE_KEY, guestId);
@@ -915,6 +989,7 @@ const apiFetch = async (
   const headers = new Headers(init.headers);
 
   if (options.guestId) {
+    await ensureGuestApiSession(options.guestId);
     headers.set("X-ClinicScribe-Guest", "local");
     headers.set("X-ClinicScribe-Guest-Id", options.guestId);
   } else {
@@ -1933,11 +2008,26 @@ function App() {
     setSelectedNoteText(selectedText.replace(/\s+/g, " ").slice(0, 8000));
   };
 
-  const enterGuestMode = () => {
-    setGuestModeActive(true);
+  const enterGuestMode = async () => {
     setAuthError("");
-    setCurrentUser(makeGuestUser());
-    setStatus("Guest mode");
+    setIsAuthSubmitting(true);
+
+    try {
+      const guestUser = makeGuestUser();
+
+      await ensureGuestApiSession(guestUser.id);
+      setGuestModeActive(true);
+      setCurrentUser(guestUser);
+      setStatus("Guest mode");
+    } catch (guestError) {
+      setAuthError(
+        guestError instanceof Error
+          ? guestError.message
+          : "Unable to start guest mode.",
+      );
+    } finally {
+      setIsAuthSubmitting(false);
+    }
   };
 
   const startGuestAccountSync = (mode: AuthMode) => {
@@ -1946,6 +2036,7 @@ function App() {
     }
 
     setGuestModeActive(false);
+    void clearGuestApiSession();
     setAuthMode(mode);
     setAuthError(
       mode === "signup"
@@ -2069,6 +2160,7 @@ function App() {
     try {
       if (isGuestMode) {
         setGuestModeActive(false);
+        await clearGuestApiSession();
       } else {
         const { error: signOutError } = await supabase.auth.signOut();
 
@@ -2106,9 +2198,11 @@ function App() {
     }
   };
 
-  const loadSavedNotes = async () => {
-    setIsLoadingNotes(true);
-    setVaultError("");
+  const loadSavedNotes = async (options: LoadRecordsOptions = {}) => {
+    if (!options.silent) {
+      setIsLoadingNotes(true);
+      setVaultError("");
+    }
 
     try {
       const notes = isGuestMode
@@ -2122,17 +2216,23 @@ function App() {
       setSavedNotes(notes);
       return notes;
     } catch (notesError) {
-      setVaultError(
-        notesError instanceof Error ? notesError.message : "Unable to load notes.",
-      );
+      if (!options.silent) {
+        setVaultError(
+          notesError instanceof Error ? notesError.message : "Unable to load notes.",
+        );
+      }
       return [];
     } finally {
-      setIsLoadingNotes(false);
+      if (!options.silent) {
+        setIsLoadingNotes(false);
+      }
     }
   };
 
-  const loadPatientProfiles = async () => {
-    setVaultError("");
+  const loadPatientProfiles = async (options: LoadRecordsOptions = {}) => {
+    if (!options.silent) {
+      setVaultError("");
+    }
 
     try {
       const profiles = isGuestMode
@@ -2142,13 +2242,24 @@ function App() {
       setPatientProfiles(profiles);
       return profiles;
     } catch (profileError) {
-      setVaultError(
-        profileError instanceof Error
-          ? profileError.message
-          : "Unable to load patient profiles.",
-      );
+      if (!options.silent) {
+        setVaultError(
+          profileError instanceof Error
+            ? profileError.message
+            : "Unable to load patient profiles.",
+        );
+      }
       return [];
     }
+  };
+
+  const refreshSavedData = async (options: LoadRecordsOptions = {}) => {
+    const [notes] = await Promise.all([
+      loadSavedNotes(options),
+      loadPatientProfiles(options),
+    ]);
+
+    return notes;
   };
 
   const navigateToView = (view: AppView) => {
@@ -2161,8 +2272,7 @@ function App() {
     setActiveView(view);
 
     if (view === "dashboard") {
-      void loadSavedNotes();
-      void loadPatientProfiles();
+      void refreshSavedData();
     }
   };
 
@@ -2179,8 +2289,7 @@ function App() {
 
     setSelectedPatientProfileId(profileId);
     setActiveView("patient");
-    void loadSavedNotes();
-    void loadPatientProfiles();
+    void refreshSavedData();
   };
 
   const openSavedNote = async (noteId: string) => {
@@ -2470,7 +2579,7 @@ function App() {
         );
       }
 
-      void loadSavedNotes();
+      void refreshSavedData({ silent: true });
     } catch (translationError) {
       setNoteError(
         translationError instanceof Error
@@ -2947,7 +3056,7 @@ function App() {
       setSavedNotes((currentNotes) =>
         upsertSavedNoteSummary(currentNotes, savedSummary),
       );
-      void loadPatientProfiles();
+      void loadPatientProfiles({ silent: true });
       lastPatientRecordAutosaveSignatureRef.current =
         options.signature || getPatientRecordAutosaveSignature(savedNoteResult);
       setPatientRecordStatus(
@@ -3108,9 +3217,46 @@ function App() {
       return;
     }
 
-    void loadSavedNotes();
-    void loadPatientProfiles();
+    void refreshSavedData();
   }, [currentUser]);
+
+  useEffect(() => {
+    if (
+      !currentUser ||
+      isGuestMode ||
+      (activeView !== "dashboard" && activeView !== "patient")
+    ) {
+      return;
+    }
+
+    let isDisposed = false;
+    const refreshRemoteRecords = () => {
+      if (isDisposed || document.visibilityState === "hidden") {
+        return;
+      }
+
+      void refreshSavedData({ silent: true });
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refreshRemoteRecords();
+      }
+    };
+    const intervalId = window.setInterval(
+      refreshRemoteRecords,
+      REMOTE_SYNC_REFRESH_MS,
+    );
+
+    window.addEventListener("focus", refreshRemoteRecords);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      isDisposed = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", refreshRemoteRecords);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [activeView, currentUser, isGuestMode]);
 
   useEffect(() => {
     const handlePopState = () => {
@@ -3122,8 +3268,7 @@ function App() {
       );
 
       if (currentUser && (nextView === "dashboard" || nextView === "patient")) {
-        void loadSavedNotes();
-        void loadPatientProfiles();
+        void refreshSavedData();
       }
     };
 
@@ -3149,7 +3294,7 @@ function App() {
     }
 
     try {
-      const savedDraft = localStorage.getItem(getAutosaveKey(currentUser.id));
+      const savedDraft = sessionStorage.getItem(getAutosaveKey(currentUser.id));
 
       if (!savedDraft) {
         setAutosaveStatus("Autosave ready");
@@ -3231,7 +3376,7 @@ function App() {
       try {
         if (suppressNextAutosaveRef.current) {
           suppressNextAutosaveRef.current = false;
-          localStorage.removeItem(getAutosaveKey(currentUser.id));
+          sessionStorage.removeItem(getAutosaveKey(currentUser.id));
           setAutosaveStatus("Transcript cleared");
           return;
         }
@@ -3246,12 +3391,12 @@ function App() {
           currentNoteTitle.trim().length > 0;
 
         if (!hasDraft) {
-          localStorage.removeItem(getAutosaveKey(currentUser.id));
+          sessionStorage.removeItem(getAutosaveKey(currentUser.id));
           setAutosaveStatus("Autosave ready");
           return;
         }
 
-        localStorage.setItem(
+        sessionStorage.setItem(
           getAutosaveKey(currentUser.id),
           JSON.stringify({
             activeView,
@@ -3522,7 +3667,8 @@ function App() {
 
             <button
               className="mt-3 w-full rounded-lg border border-zinc-300 px-4 py-3 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
-              onClick={enterGuestMode}
+              disabled={isAuthSubmitting}
+              onClick={() => void enterGuestMode()}
               type="button"
             >
               Continue as guest
@@ -3905,7 +4051,7 @@ function App() {
                 disabled={isLoadingNotes}
                 icon="refresh"
                 label={isLoadingNotes ? "Refreshing" : "Refresh"}
-                onClick={() => void loadSavedNotes()}
+                onClick={() => void refreshSavedData()}
               />
             ) : null}
           </div>

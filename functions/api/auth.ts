@@ -27,6 +27,8 @@ type StoredSession = {
   expiresAt: string;
 };
 
+type StoredGuestSession = StoredSession;
+
 type UpstashResponse = {
   result?: unknown;
   error?: string;
@@ -40,7 +42,13 @@ type SupabaseUserResponse = {
 };
 
 const SESSION_COOKIE_NAME = "clinicscribe_session";
+const GUEST_SESSION_COOKIE_NAME = "clinicscribe_guest_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
+const GUEST_SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
+const GUEST_SESSION_CREATE_LIMIT = 30;
+const GUEST_SESSION_CREATE_WINDOW_SECONDS = 60 * 60;
+const GUEST_API_LIMIT = 300;
+const GUEST_API_WINDOW_SECONDS = 60 * 60;
 const PASSWORD_HASH_ITERATIONS = 100000;
 const REDIS_PREFIX = "clinicscribe";
 const textEncoder = new TextEncoder();
@@ -50,13 +58,23 @@ const jsonHeaders = {
   "Cache-Control": "no-store",
 };
 
+const makeJsonHeaders = (headersInit?: HeadersInit) => {
+  const headers =
+    headersInit instanceof Headers ? headersInit : new Headers(headersInit);
+
+  Object.entries(jsonHeaders).forEach(([name, value]) => {
+    if (!headers.has(name)) {
+      headers.set(name, value);
+    }
+  });
+
+  return headers;
+};
+
 const jsonResponse = (body: unknown, init?: ResponseInit) =>
   new Response(JSON.stringify(body), {
     ...init,
-    headers: {
-      ...jsonHeaders,
-      ...init?.headers,
-    },
+    headers: makeJsonHeaders(init?.headers),
   });
 
 class AuthServiceError extends Error {
@@ -142,6 +160,10 @@ const getUserKey = (userId: string) => `${REDIS_PREFIX}:user:${userId}`;
 const getEmailKey = (email: string) => `${REDIS_PREFIX}:user-email:${email}`;
 const getSessionKey = (sessionHash: string) =>
   `${REDIS_PREFIX}:session:${sessionHash}`;
+const getGuestSessionKey = (sessionHash: string) =>
+  `${REDIS_PREFIX}:guest-session:${sessionHash}`;
+const getRateLimitKey = (scope: string, identifierHash: string) =>
+  `${REDIS_PREFIX}:rate-limit:${scope}:${identifierHash}`;
 
 const toPublicUser = (user: StoredUser): PublicUser => ({
   id: user.id,
@@ -256,6 +278,12 @@ const parseStoredSession = (value: unknown) => {
   return null;
 };
 
+const parseStoredGuestSession = (value: unknown) => {
+  const session = parseStoredSession(value);
+
+  return session as StoredGuestSession | null;
+};
+
 const parseCookies = (request: Request) => {
   const cookieHeader = request.headers.get("Cookie") ?? "";
 
@@ -271,15 +299,16 @@ const parseCookies = (request: Request) => {
   }, {});
 };
 
-const makeSessionCookie = (
+const makeCookie = (
   request: Request,
+  name: string,
   token: string,
   maxAgeSeconds: number,
 ) => {
   const secure = new URL(request.url).protocol === "https:";
 
   return [
-    `${SESSION_COOKIE_NAME}=${token}`,
+    `${name}=${token}`,
     "Path=/",
     "HttpOnly",
     "SameSite=Lax",
@@ -290,8 +319,23 @@ const makeSessionCookie = (
     .join("; ");
 };
 
+const makeSessionCookie = (
+  request: Request,
+  token: string,
+  maxAgeSeconds: number,
+) => makeCookie(request, SESSION_COOKIE_NAME, token, maxAgeSeconds);
+
 const makeExpiredSessionCookie = (request: Request) =>
   makeSessionCookie(request, "", 0);
+
+const makeGuestSessionCookie = (
+  request: Request,
+  token: string,
+  maxAgeSeconds: number,
+) => makeCookie(request, GUEST_SESSION_COOKIE_NAME, token, maxAgeSeconds);
+
+const makeExpiredGuestSessionCookie = (request: Request) =>
+  makeGuestSessionCookie(request, "", 0);
 
 const getBearerToken = (request: Request) => {
   const authorization = request.headers.get("Authorization") ?? "";
@@ -300,16 +344,102 @@ const getBearerToken = (request: Request) => {
   return match?.[1]?.trim() || "";
 };
 
-const getGuestUser = (request: Request): PublicUser | null => {
+const getClientIp = (request: Request) => {
+  const forwardedFor = request.headers.get("X-Forwarded-For") ?? "";
+  const forwardedIp = forwardedFor.split(",")[0]?.trim();
+
+  return (
+    request.headers.get("CF-Connecting-IP")?.trim() ||
+    forwardedIp ||
+    "unknown"
+  );
+};
+
+const getGuestId = (request: Request) => {
   if (request.headers.get("X-ClinicScribe-Guest") !== "local") {
     return null;
   }
 
   const guestId = request.headers.get("X-ClinicScribe-Guest-Id")?.trim() ?? "";
 
-  if (!/^[A-Za-z0-9_-]{12,96}$/.test(guestId)) {
+  if (
+    !/^guest_[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      guestId,
+    )
+  ) {
     return null;
   }
+
+  return guestId;
+};
+
+const enforceRateLimit = async (
+  env: AuthEnv,
+  scope: string,
+  identifier: string,
+  limit: number,
+  windowSeconds: number,
+) => {
+  const identifierHash = await sha256(identifier);
+  const key = getRateLimitKey(scope, identifierHash);
+  const result = await redisCommand(env, ["INCR", key]);
+  const count =
+    typeof result === "number"
+      ? result
+      : typeof result === "string"
+        ? Number.parseInt(result, 10)
+        : Number.NaN;
+
+  if (count === 1) {
+    await redisCommand(env, ["EXPIRE", key, windowSeconds]);
+  }
+
+  if (!Number.isFinite(count)) {
+    throw new AuthServiceError("Unable to enforce request limits.");
+  }
+
+  if (count > limit) {
+    throw new AuthServiceError("Too many requests. Try again later.", 429);
+  }
+};
+
+const getGuestUser = async (
+  request: Request,
+  env: AuthEnv,
+): Promise<PublicUser | null> => {
+  const guestId = getGuestId(request);
+
+  if (!guestId) {
+    return null;
+  }
+
+  const token = parseCookies(request)[GUEST_SESSION_COOKIE_NAME];
+
+  if (!token) {
+    return null;
+  }
+
+  const sessionHash = await sha256(token);
+  const session = parseStoredGuestSession(
+    await redisCommand(env, ["GET", getGuestSessionKey(sessionHash)]),
+  );
+
+  if (!session || session.userId !== guestId) {
+    return null;
+  }
+
+  if (Date.parse(session.expiresAt) <= Date.now()) {
+    await redisCommand(env, ["DEL", getGuestSessionKey(sessionHash)]);
+    return null;
+  }
+
+  await enforceRateLimit(
+    env,
+    "guest-api",
+    `${guestId}:${getClientIp(request)}`,
+    GUEST_API_LIMIT,
+    GUEST_API_WINDOW_SECONDS,
+  );
 
   return {
     id: guestId,
@@ -507,6 +637,56 @@ const createSession = async (
   return makeSessionCookie(request, token, SESSION_TTL_SECONDS);
 };
 
+const createGuestSession = async (
+  request: Request,
+  env: AuthEnv,
+  guestId: string,
+) => {
+  if (
+    !/^guest_[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      guestId,
+    )
+  ) {
+    throw new AuthServiceError("Invalid guest session.", 400);
+  }
+
+  await enforceRateLimit(
+    env,
+    "guest-session-create",
+    getClientIp(request),
+    GUEST_SESSION_CREATE_LIMIT,
+    GUEST_SESSION_CREATE_WINDOW_SECONDS,
+  );
+
+  const token = randomToken(32);
+  const sessionHash = await sha256(token);
+  const now = Date.now();
+  const session: StoredGuestSession = {
+    userId: guestId,
+    createdAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + GUEST_SESSION_TTL_SECONDS * 1000).toISOString(),
+  };
+
+  await redisCommand(env, [
+    "SET",
+    getGuestSessionKey(sessionHash),
+    JSON.stringify(session),
+    "EX",
+    GUEST_SESSION_TTL_SECONDS,
+  ]);
+
+  return {
+    cookie: makeGuestSessionCookie(request, token, GUEST_SESSION_TTL_SECONDS),
+    user: {
+      id: guestId,
+      email: "local-guest",
+      name: "Guest",
+      createdAt: session.createdAt,
+      isGuest: true,
+    } satisfies PublicUser,
+  };
+};
+
 const destroySession = async (request: Request, env: AuthEnv) => {
   const token = parseCookies(request)[SESSION_COOKIE_NAME];
 
@@ -518,8 +698,19 @@ const destroySession = async (request: Request, env: AuthEnv) => {
   await redisCommand(env, ["DEL", getSessionKey(sessionHash)]);
 };
 
+const destroyGuestSession = async (request: Request, env: AuthEnv) => {
+  const token = parseCookies(request)[GUEST_SESSION_COOKIE_NAME];
+
+  if (!token) {
+    return;
+  }
+
+  const sessionHash = await sha256(token);
+  await redisCommand(env, ["DEL", getGuestSessionKey(sessionHash)]);
+};
+
 const getAuthenticatedUser = async (request: Request, env: AuthEnv) => {
-  const guestUser = getGuestUser(request);
+  const guestUser = await getGuestUser(request, env);
 
   if (guestUser) {
     return guestUser;
@@ -621,16 +812,40 @@ export const onRequestPost: PagesFunction<AuthEnv> = async ({ request, env }) =>
     body && typeof body === "object" && "action" in body
       ? (body as { action?: unknown }).action
       : undefined;
+  const record =
+    body && typeof body === "object" ? (body as Record<string, unknown>) : {};
 
   if (action === "logout") {
     try {
       await destroySession(request, env);
+      await destroyGuestSession(request, env);
+
+      const headers = new Headers();
+      headers.append("Set-Cookie", makeExpiredSessionCookie(request));
+      headers.append("Set-Cookie", makeExpiredGuestSessionCookie(request));
 
       return jsonResponse(
         { ok: true },
         {
+          headers,
+        },
+      );
+    } catch (error) {
+      return toAuthErrorResponse(error);
+    }
+  }
+
+  if (action === "guest") {
+    const guestId = typeof record.guestId === "string" ? record.guestId.trim() : "";
+
+    try {
+      const guestSession = await createGuestSession(request, env, guestId);
+
+      return jsonResponse(
+        { user: guestSession.user },
+        {
           headers: {
-            "Set-Cookie": makeExpiredSessionCookie(request),
+            "Set-Cookie": guestSession.cookie,
           },
         },
       );
@@ -643,8 +858,6 @@ export const onRequestPost: PagesFunction<AuthEnv> = async ({ request, env }) =>
     return jsonResponse({ error: "Unknown auth action." }, { status: 400 });
   }
 
-  const record =
-    body && typeof body === "object" ? (body as Record<string, unknown>) : {};
   const validationError = validateAccountInput(
     action,
     record.email,

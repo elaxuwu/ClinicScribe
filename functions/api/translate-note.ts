@@ -34,8 +34,6 @@ type ProviderFailure = {
   message: string;
   kind?: ProviderErrorKind;
   status?: number;
-  details?: unknown;
-  body_preview?: string;
 };
 
 const CHAT_COMPLETIONS_PATH = "/chat/completions";
@@ -487,8 +485,6 @@ const summarizeProviderFailure = (
       message: error.message,
       kind: error.kind,
       status: error.status,
-      details: error.details,
-      body_preview: error.bodyPreview,
     };
   }
 
@@ -524,7 +520,6 @@ const translateWithFallback = async (
         "Unable to translate note. Featherless primary and Ollama Cloud fallback both failed.",
         {
           kind: "http",
-          details: [featherlessFailure, ollamaFailure],
         },
       );
     }
@@ -605,7 +600,6 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
         return jsonResponse(
           {
             error: error.message,
-            details: error.details,
           },
           { status: 502 },
         );
@@ -685,7 +679,6 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
       return jsonResponse(
         {
           error: error.message,
-          details: error.details,
         },
         { status: 502 },
       );

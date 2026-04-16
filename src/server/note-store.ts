@@ -80,6 +80,11 @@ const getNoteKey = (noteId: string) => `${NOTE_PREFIX}:note:${noteId}`;
 const getPendingRecordingKey = (recordingId: string) =>
   `${NOTE_PREFIX}:pending-recording:${recordingId}`;
 
+const isGuestUserId = (userId: string) =>
+  /^guest_[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    userId,
+  );
+
 const asRecord = (value: unknown) =>
   value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -414,7 +419,7 @@ export const saveClinicNoteRecord = async (env: AuthEnv, note: ClinicNote) => {
 
   await redisCommand(
     env,
-    note.userId.startsWith("guest_")
+    isGuestUserId(note.userId)
       ? [
           "SET",
           getNoteKey(note.id),

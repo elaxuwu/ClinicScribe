@@ -88,14 +88,30 @@ drop policy if exists "Users can create their own encounters" on public.encounte
 create policy "Users can create their own encounters"
   on public.encounters
   for insert
-  with check (auth.uid() = user_id);
+  with check (
+    auth.uid() = user_id
+    and exists (
+      select 1
+      from public.patients
+      where patients.id = encounters.patient_id
+        and patients.user_id = auth.uid()
+    )
+  );
 
 drop policy if exists "Users can update their own encounters" on public.encounters;
 create policy "Users can update their own encounters"
   on public.encounters
   for update
   using (auth.uid() = user_id)
-  with check (auth.uid() = user_id);
+  with check (
+    auth.uid() = user_id
+    and exists (
+      select 1
+      from public.patients
+      where patients.id = encounters.patient_id
+        and patients.user_id = auth.uid()
+    )
+  );
 
 drop policy if exists "Users can delete their own encounters" on public.encounters;
 create policy "Users can delete their own encounters"
