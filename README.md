@@ -185,6 +185,12 @@ ClinicScribe is meant to help draft documentation, not replace clinical judgment
 
 Clinic visits move fast. Notes should not eat the whole day after the visit is already over. ClinicScribe is an attempt to make the boring admin part lighter while keeping the human part of care in front.
 
+## Model Details
+
+ClinicScribe uses large language models and speech AI APIs rather than a custom-trained model. The system applies prompt-based NLP workflows to convert transcripts into structured clinical notes, extract patient details, translate notes, and support note editing through a chat interface.
+
+For evaluation, we tested the app using sample de-identified clinic conversations across English, Vietnamese, and mixed-language scenarios. We checked note completeness, patient detail extraction, formatting consistency, translation quality, and whether the model avoided inventing unsupported medical facts.
+
 ## License
 
 Licensed under **PolyForm Noncommercial License 1.0.0**.
