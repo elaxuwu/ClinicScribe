@@ -36,7 +36,8 @@ const OLLAMA_CHAT_URL = "https://ollama.com/api/chat";
 const NOTE_MAX_TOKENS = 4500;
 const MAX_MESSAGE_CHARS = 5000;
 const MAX_SELECTED_TEXT_CHARS = 8000;
-const MAX_CHAT_HISTORY_MESSAGES = 12;
+const MAX_CHAT_HISTORY_MESSAGES = 8;
+const MAX_CHAT_HISTORY_MESSAGE_CHARS = 1000;
 
 // The response envelope stays small so chat text and note updates land together.
 const EDIT_SYSTEM_PROMPT = `You are ClinicScribe AI, a friendly clinical note assistant for clinicians.
@@ -415,7 +416,7 @@ const normalizeHistoryMessages = (value: unknown): ChatMessage[] =>
           const role = record?.role === "assistant" ? "assistant" : "user";
           const content =
             typeof record?.content === "string"
-              ? truncateText(record.content.trim(), MAX_MESSAGE_CHARS)
+              ? truncateText(record.content.trim(), MAX_CHAT_HISTORY_MESSAGE_CHARS)
               : "";
 
           return content ? { role, content } : null;
@@ -424,32 +425,43 @@ const normalizeHistoryMessages = (value: unknown): ChatMessage[] =>
         .slice(-MAX_CHAT_HISTORY_MESSAGES)
     : [];
 
+const formatChatHistoryForPrompt = (chatHistory: ChatMessage[]) =>
+  chatHistory
+    .map((message) => `${message.role}: ${message.content}`)
+    .join("\n\n");
+
 const createEditMessages = (
   note: Record<string, unknown>,
   message: string,
   selectedText: string,
   chatHistory: ChatMessage[],
-): ChatMessage[] => [
-  { role: "system", content: EDIT_SYSTEM_PROMPT },
-  ...chatHistory,
-  {
-    role: "user",
-    content: [
-      "Work with this current clinical note JSON.",
-      "Chat if the request is conversational. Edit only when the clinician asks for a note change.",
-      "Return only the required JSON shape.",
-      "",
-      "current_note_json:",
-      JSON.stringify(getEditableNotePromptPayload(note)),
-      "",
-      selectedText ? "selected_text:" : "",
-      selectedText,
-      "",
-      "clinician_request:",
-      message,
-    ].join("\n"),
-  },
-];
+): ChatMessage[] => {
+  const chatHistoryText = formatChatHistoryForPrompt(chatHistory);
+
+  return [
+    { role: "system", content: EDIT_SYSTEM_PROMPT },
+    {
+      role: "user",
+      content: [
+        "Work with this current clinical note JSON.",
+        "Chat if the request is conversational. Edit only when the clinician asks for a note change.",
+        "Return only the required JSON shape.",
+        "",
+        "current_note_json:",
+        JSON.stringify(getEditableNotePromptPayload(note)),
+        "",
+        chatHistoryText ? "recent_chat_history:" : "",
+        chatHistoryText,
+        "",
+        selectedText ? "selected_text:" : "",
+        selectedText,
+        "",
+        "clinician_request:",
+        message,
+      ].join("\n"),
+    },
+  ];
+};
 
 const createFeatherlessCompletionBody = (
   model: string,
