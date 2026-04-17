@@ -2682,7 +2682,7 @@ function App() {
           note: toNoteRecord(source),
           message,
           selectedText,
-          chatHistory: historyWithUserMessage.slice(-12),
+          chatHistory: noteChatMessages.slice(-12),
         }),
       }, isGuestMode ? { guestId } : {});
       const responseJson = (await parseJsonResponse(

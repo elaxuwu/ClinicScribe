@@ -616,6 +616,18 @@ const summarizeProviderFailure = (
   };
 };
 
+const formatProviderFailureDetails = (failures: ProviderFailure[]) =>
+  failures
+    .map((failure) => {
+      const provider =
+        failure.provider === "featherless" ? "Featherless" : "Ollama Cloud";
+      const kind = failure.kind ?? "unknown";
+      const status = failure.status ? ` HTTP ${failure.status}` : "";
+
+      return `${provider}: ${kind}${status}`;
+    })
+    .join("; ");
+
 const editWithFallback = async (
   env: Env,
   messages: ChatMessage[],
@@ -637,11 +649,18 @@ const editWithFallback = async (
       const ollamaFailure = summarizeProviderFailure("ollama", ollamaError);
 
       logError("Ollama Cloud note-edit failure", ollamaFailure);
+      logError("All note-edit providers failed", {
+        failures: [featherlessFailure, ollamaFailure],
+      });
 
       throw new ProviderRequestError(
         "Unable to edit note. Featherless primary and Ollama Cloud fallback both failed.",
         {
           kind: "http",
+          details: formatProviderFailureDetails([
+            featherlessFailure,
+            ollamaFailure,
+          ]),
         },
       );
     }
@@ -697,6 +716,9 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
       return jsonResponse(
         {
           error: error.message,
+          ...(typeof error.details === "string"
+            ? { details: error.details }
+            : {}),
         },
         { status: 502 },
       );
