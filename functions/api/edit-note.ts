@@ -403,6 +403,9 @@ const hasNoteChanged = (
   JSON.stringify(getComparableNotePayload(sourceNote, providerUsed)) !==
   JSON.stringify(getComparableNotePayload(modelNote, providerUsed));
 
+const getEditableNotePromptPayload = (note: Record<string, unknown>) =>
+  getComparableNotePayload(note, "featherless");
+
 // Keep enough context to feel continuous without letting chat history crowd out the note.
 const normalizeHistoryMessages = (value: unknown): ChatMessage[] =>
   Array.isArray(value)
@@ -437,7 +440,7 @@ const createEditMessages = (
       "Return only the required JSON shape.",
       "",
       "current_note_json:",
-      JSON.stringify(note),
+      JSON.stringify(getEditableNotePromptPayload(note)),
       "",
       selectedText ? "selected_text:" : "",
       selectedText,
