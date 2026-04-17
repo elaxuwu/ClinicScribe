@@ -1,4 +1,4 @@
-SUPABASE_URL=https://lcsjgsvxeenlqmcukvro.supabase.co
+SUPABASE_URL=https://your-project-ref.supabase.co
 SUPABASE_PUBLISHABLE_KEY=your-supabase-publishable-key
 UPSTASH_DATABASE_URL=your-upstash-rest-url
 UPSTASH_DATABASE_KEY=your-upstash-rest-token
