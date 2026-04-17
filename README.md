@@ -4,7 +4,7 @@ ClinicScribe is a small AI medical scribe app for clinic visits. It records a do
 
 It also keeps a lightweight patient dashboard so notes are not just floating around in a tab somewhere. Because we have all lost things to browser tabs. 😅
 
-![[ClinicScribe logo](image/logo.png)](https://youtu.be/vK-qdlXqPTA)
+[![ClinicScribe logo](image/logo.png)](https://youtu.be/vK-qdlXqPTA)
 
 ### **TEST IT HERE: https://clinicscribe.pages.dev/**
 ### **DEVPOST SUBMISSION: https://devpost.com/software/clinicscribe**
