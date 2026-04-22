@@ -26,6 +26,7 @@ const ALLOWED_AUDIO_TYPES = new Set([
 
 const jsonHeaders = {
   "Content-Type": "application/json",
+  "Cache-Control": "no-store",
 };
 
 const jsonResponse = (body: unknown, init?: ResponseInit) =>
@@ -40,6 +41,60 @@ const jsonResponse = (body: unknown, init?: ResponseInit) =>
 // MediaRecorder often appends codec params; the allow-list only needs the base type.
 const getNormalizedMediaType = (type: string) =>
   type.split(";")[0]?.trim().toLowerCase() ?? "";
+
+class RequestBodyTooLargeError extends Error {
+  constructor() {
+    super("Audio upload is too large.");
+    this.name = "RequestBodyTooLargeError";
+  }
+}
+
+const readRequestBodyWithLimit = async (request: Request, maxBytes: number) => {
+  const stream = request.body;
+
+  if (!stream) {
+    return null;
+  }
+
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+
+      if (done) {
+        break;
+      }
+
+      if (!value) {
+        continue;
+      }
+
+      totalBytes += value.byteLength;
+
+      if (totalBytes > maxBytes) {
+        await reader.cancel();
+        throw new RequestBodyTooLargeError();
+      }
+
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const body = new Uint8Array(totalBytes);
+  let offset = 0;
+
+  chunks.forEach((chunk) => {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  });
+
+  return body;
+};
 
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   const authResult = await requireAuthenticatedUser(request, env);
@@ -89,10 +144,41 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     );
   }
 
+  let rawBody: Uint8Array | null;
+
+  try {
+    rawBody = await readRequestBodyWithLimit(request, MAX_MULTIPART_UPLOAD_BYTES);
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      return jsonResponse(
+        { error: "Audio upload is too large." },
+        { status: 413 },
+      );
+    }
+
+    return jsonResponse(
+      { error: "Unable to read upload body." },
+      { status: 400 },
+    );
+  }
+
+  if (!rawBody || rawBody.byteLength === 0) {
+    return jsonResponse(
+      { error: "A non-empty audio file field named 'audio' is required." },
+      { status: 400 },
+    );
+  }
+
   let requestFormData: FormData;
 
   try {
-    requestFormData = await request.formData();
+    requestFormData = await new Request(request.url, {
+      method: request.method,
+      headers: {
+        "content-type": contentType,
+      },
+      body: new Blob([new Uint8Array(rawBody)]),
+    }).formData();
   } catch {
     return jsonResponse(
       { error: "Unable to read multipart form data." },

@@ -1,5 +1,5 @@
 // Cloudflare Functions keep auth deliberately small: Supabase bearer tokens for
-// real accounts, Redis cookies for the local/demo account flow.
+// real accounts, Redis cookies for the local/demo guest flow.
 export type AuthEnv = {
   UPSTASH_DATABASE_URL?: string;
   UPSTASH_DATABASE_KEY?: string;
@@ -16,11 +16,6 @@ export type PublicUser = {
   createdAt: string;
   accessToken?: string;
   isGuest?: boolean;
-};
-
-type StoredUser = PublicUser & {
-  passwordHash: string;
-  passwordSalt: string;
 };
 
 type StoredSession = {
@@ -43,15 +38,13 @@ type SupabaseUserResponse = {
   user_metadata?: unknown;
 };
 
-const SESSION_COOKIE_NAME = "clinicscribe_session";
+const LEGACY_SESSION_COOKIE_NAME = "clinicscribe_session";
 const GUEST_SESSION_COOKIE_NAME = "clinicscribe_guest_session";
-const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
 const GUEST_SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
 const GUEST_SESSION_CREATE_LIMIT = 30;
 const GUEST_SESSION_CREATE_WINDOW_SECONDS = 60 * 60;
 const GUEST_API_LIMIT = 300;
 const GUEST_API_WINDOW_SECONDS = 60 * 60;
-const PASSWORD_HASH_ITERATIONS = 100000;
 const REDIS_PREFIX = "clinicscribe";
 const textEncoder = new TextEncoder();
 
@@ -61,8 +54,6 @@ const jsonHeaders = {
 };
 
 const makeJsonHeaders = (headersInit?: HeadersInit) => {
-  // Some responses set cookies, so preserve real Headers objects instead of
-  // flattening everything into a plain object.
   const headers =
     headersInit instanceof Headers ? headersInit : new Headers(headersInit);
 
@@ -160,21 +151,10 @@ export const redisCommand = async (
   return payload.result;
 };
 
-const getUserKey = (userId: string) => `${REDIS_PREFIX}:user:${userId}`;
-const getEmailKey = (email: string) => `${REDIS_PREFIX}:user-email:${email}`;
-const getSessionKey = (sessionHash: string) =>
-  `${REDIS_PREFIX}:session:${sessionHash}`;
 const getGuestSessionKey = (sessionHash: string) =>
   `${REDIS_PREFIX}:guest-session:${sessionHash}`;
 const getRateLimitKey = (scope: string, identifierHash: string) =>
   `${REDIS_PREFIX}:rate-limit:${scope}:${identifierHash}`;
-
-const toPublicUser = (user: StoredUser): PublicUser => ({
-  id: user.id,
-  email: user.email,
-  name: user.name,
-  createdAt: user.createdAt,
-});
 
 const base64UrlEncode = (bytes: Uint8Array) => {
   let binary = "";
@@ -195,69 +175,6 @@ const randomToken = (byteLength: number) => {
 const sha256 = async (value: string) => {
   const digest = await crypto.subtle.digest("SHA-256", textEncoder.encode(value));
   return base64UrlEncode(new Uint8Array(digest));
-};
-
-const hashPassword = async (password: string, salt = randomToken(16)) => {
-  const passwordKey = await crypto.subtle.importKey(
-    "raw",
-    textEncoder.encode(password),
-    "PBKDF2",
-    false,
-    ["deriveBits"],
-  );
-  const bits = await crypto.subtle.deriveBits(
-    {
-      name: "PBKDF2",
-      hash: "SHA-256",
-      salt: textEncoder.encode(salt),
-      iterations: PASSWORD_HASH_ITERATIONS,
-    },
-    passwordKey,
-    256,
-  );
-
-  return {
-    hash: base64UrlEncode(new Uint8Array(bits)),
-    salt,
-  };
-};
-
-const timingSafeEqual = (left: string, right: string) => {
-  const leftBytes = textEncoder.encode(left);
-  const rightBytes = textEncoder.encode(right);
-  const length = Math.max(leftBytes.length, rightBytes.length);
-  let difference = leftBytes.length ^ rightBytes.length;
-
-  for (let index = 0; index < length; index += 1) {
-    difference |= (leftBytes[index] ?? 0) ^ (rightBytes[index] ?? 0);
-  }
-
-  return difference === 0;
-};
-
-const parseStoredUser = (value: unknown) => {
-  if (typeof value !== "string") {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(value) as Partial<StoredUser>;
-
-    if (
-      typeof parsed.id === "string" &&
-      typeof parsed.email === "string" &&
-      typeof parsed.name === "string" &&
-      typeof parsed.createdAt === "string" &&
-      typeof parsed.passwordHash === "string" &&
-      typeof parsed.passwordSalt === "string"
-    ) {
-      return parsed as StoredUser;
-    }
-  } catch {
-    return null;
-  }
-
-  return null;
 };
 
 const parseStoredSession = (value: unknown) => {
@@ -323,14 +240,8 @@ const makeCookie = (
     .join("; ");
 };
 
-const makeSessionCookie = (
-  request: Request,
-  token: string,
-  maxAgeSeconds: number,
-) => makeCookie(request, SESSION_COOKIE_NAME, token, maxAgeSeconds);
-
-const makeExpiredSessionCookie = (request: Request) =>
-  makeSessionCookie(request, "", 0);
+const makeExpiredCookie = (request: Request, name: string) =>
+  makeCookie(request, name, "", 0);
 
 const makeGuestSessionCookie = (
   request: Request,
@@ -384,8 +295,6 @@ const enforceRateLimit = async (
   limit: number,
   windowSeconds: number,
 ) => {
-  // Cheap Redis counter. Good enough for guest/demo limits without another
-  // service in the middle.
   const identifierHash = await sha256(identifier);
   const key = getRateLimitKey(scope, identifierHash);
   const result = await redisCommand(env, ["INCR", key]);
@@ -527,124 +436,6 @@ const verifySupabaseUser = async (
   };
 };
 
-const normalizeEmail = (email: string) => email.trim().toLowerCase();
-
-const validateAccountInput = (
-  action: "signup" | "login",
-  email: unknown,
-  password: unknown,
-  name?: unknown,
-) => {
-  if (typeof email !== "string" || !email.trim()) {
-    return "Email is required.";
-  }
-
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizeEmail(email))) {
-    return "Enter a valid email address.";
-  }
-
-  if (typeof password !== "string" || !password) {
-    return "Password is required.";
-  }
-
-  if (password.length < 8) {
-    return "Password must be at least 8 characters.";
-  }
-
-  if (password.length > 128) {
-    return "Password must be 128 characters or fewer.";
-  }
-
-  if (action === "signup" && typeof name === "string" && name.length > 80) {
-    return "Name must be 80 characters or fewer.";
-  }
-
-  return null;
-};
-
-const createUser = async (
-  env: AuthEnv,
-  input: { email: string; password: string; name?: string },
-) => {
-  const email = normalizeEmail(input.email);
-  const userId = `user_${crypto.randomUUID()}`;
-  const createdAt = new Date().toISOString();
-  const password = await hashPassword(input.password);
-  const user: StoredUser = {
-    id: userId,
-    email,
-    name: input.name?.trim() || email,
-    createdAt,
-    passwordHash: password.hash,
-    passwordSalt: password.salt,
-  };
-
-  const emailIndexResult = await redisCommand(env, [
-    "SET",
-    getEmailKey(email),
-    userId,
-    "NX",
-  ]);
-
-  if (emailIndexResult !== "OK") {
-    throw new AuthServiceError("An account already exists for that email.", 409);
-  }
-
-  await redisCommand(env, ["SET", getUserKey(userId), JSON.stringify(user)]);
-
-  return toPublicUser(user);
-};
-
-const verifyUserCredentials = async (
-  env: AuthEnv,
-  emailInput: string,
-  password: string,
-) => {
-  const email = normalizeEmail(emailInput);
-  const userId = await redisCommand(env, ["GET", getEmailKey(email)]);
-
-  if (typeof userId !== "string") {
-    return null;
-  }
-
-  const user = parseStoredUser(await redisCommand(env, ["GET", getUserKey(userId)]));
-
-  if (!user) {
-    return null;
-  }
-
-  const passwordCheck = await hashPassword(password, user.passwordSalt);
-
-  return timingSafeEqual(passwordCheck.hash, user.passwordHash)
-    ? toPublicUser(user)
-    : null;
-};
-
-const createSession = async (
-  request: Request,
-  env: AuthEnv,
-  user: PublicUser,
-) => {
-  const token = randomToken(32);
-  const sessionHash = await sha256(token);
-  const now = Date.now();
-  const session: StoredSession = {
-    userId: user.id,
-    createdAt: new Date(now).toISOString(),
-    expiresAt: new Date(now + SESSION_TTL_SECONDS * 1000).toISOString(),
-  };
-
-  await redisCommand(env, [
-    "SET",
-    getSessionKey(sessionHash),
-    JSON.stringify(session),
-    "EX",
-    SESSION_TTL_SECONDS,
-  ]);
-
-  return makeSessionCookie(request, token, SESSION_TTL_SECONDS);
-};
-
 const createGuestSession = async (
   request: Request,
   env: AuthEnv,
@@ -695,17 +486,6 @@ const createGuestSession = async (
   };
 };
 
-const destroySession = async (request: Request, env: AuthEnv) => {
-  const token = parseCookies(request)[SESSION_COOKIE_NAME];
-
-  if (!token) {
-    return;
-  }
-
-  const sessionHash = await sha256(token);
-  await redisCommand(env, ["DEL", getSessionKey(sessionHash)]);
-};
-
 const destroyGuestSession = async (request: Request, env: AuthEnv) => {
   const token = parseCookies(request)[GUEST_SESSION_COOKIE_NAME];
 
@@ -718,45 +498,13 @@ const destroyGuestSession = async (request: Request, env: AuthEnv) => {
 };
 
 const getAuthenticatedUser = async (request: Request, env: AuthEnv) => {
-  // Order matters: guest cookie, Supabase bearer token, then the older
-  // Redis-backed email/password session.
   const guestUser = await getGuestUser(request, env);
 
   if (guestUser) {
     return guestUser;
   }
 
-  const supabaseUser = await verifySupabaseUser(request, env);
-
-  if (supabaseUser || getBearerToken(request)) {
-    return supabaseUser;
-  }
-
-  const token = parseCookies(request)[SESSION_COOKIE_NAME];
-
-  if (!token) {
-    return null;
-  }
-
-  const sessionHash = await sha256(token);
-  const session = parseStoredSession(
-    await redisCommand(env, ["GET", getSessionKey(sessionHash)]),
-  );
-
-  if (!session) {
-    return null;
-  }
-
-  if (Date.parse(session.expiresAt) <= Date.now()) {
-    await redisCommand(env, ["DEL", getSessionKey(sessionHash)]);
-    return null;
-  }
-
-  const user = parseStoredUser(
-    await redisCommand(env, ["GET", getUserKey(session.userId)]),
-  );
-
-  return user ? toPublicUser(user) : null;
+  return verifySupabaseUser(request, env);
 };
 
 export const requireAuthenticatedUser = async (
@@ -827,11 +575,13 @@ export const onRequestPost: PagesFunction<AuthEnv> = async ({ request, env }) =>
 
   if (action === "logout") {
     try {
-      await destroySession(request, env);
       await destroyGuestSession(request, env);
 
       const headers = new Headers();
-      headers.append("Set-Cookie", makeExpiredSessionCookie(request));
+      headers.append(
+        "Set-Cookie",
+        makeExpiredCookie(request, LEGACY_SESSION_COOKIE_NAME),
+      );
       headers.append("Set-Cookie", makeExpiredGuestSessionCookie(request));
 
       return jsonResponse(
@@ -864,46 +614,15 @@ export const onRequestPost: PagesFunction<AuthEnv> = async ({ request, env }) =>
     }
   }
 
-  if (action !== "signup" && action !== "login") {
-    return jsonResponse({ error: "Unknown auth action." }, { status: 400 });
-  }
-
-  const validationError = validateAccountInput(
-    action,
-    record.email,
-    record.password,
-    record.name,
-  );
-
-  if (validationError) {
-    return jsonResponse({ error: validationError }, { status: 400 });
-  }
-
-  const email = record.email as string;
-  const password = record.password as string;
-  const name = typeof record.name === "string" ? record.name : undefined;
-
-  try {
-    const user =
-      action === "signup"
-        ? await createUser(env, { email, password, name })
-        : await verifyUserCredentials(env, email, password);
-
-    if (!user) {
-      return jsonResponse({ error: "Invalid email or password." }, { status: 401 });
-    }
-
-    const sessionCookie = await createSession(request, env, user);
-
+  if (action === "signup" || action === "login") {
     return jsonResponse(
-      { user },
       {
-        headers: {
-          "Set-Cookie": sessionCookie,
-        },
+        error:
+          "Account authentication is handled by Supabase. Use the app's Supabase sign-in flow instead of /api/auth.",
       },
+      { status: 410 },
     );
-  } catch (error) {
-    return toAuthErrorResponse(error);
   }
+
+  return jsonResponse({ error: "Unknown auth action." }, { status: 400 });
 };

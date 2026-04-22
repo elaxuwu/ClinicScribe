@@ -117,6 +117,7 @@ class ProviderRequestError extends Error {
 
 const jsonHeaders = {
   "Content-Type": "application/json",
+  "Cache-Control": "no-store",
 };
 
 const jsonResponse = (body: unknown, init?: ResponseInit) =>
