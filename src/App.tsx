@@ -4838,6 +4838,36 @@ function App() {
               {noteError}
             </div>
           ) : null}
+
+          <div className="mt-6 flex flex-col gap-2 border-t border-zinc-200 pt-4 text-xs text-zinc-500 sm:flex-row sm:items-center sm:justify-between">
+            <p className="font-medium text-zinc-600">Credits</p>
+            <div className="flex flex-wrap gap-x-3 gap-y-1">
+              <a
+                className="font-medium text-zinc-700 underline-offset-4 transition hover:text-zinc-950 hover:underline"
+                href="https://devpost.com/software/clinicscribe?ref_content=user-portfolio&ref_feature=in_progress"
+                rel="noreferrer"
+                target="_blank"
+              >
+                Devpost
+              </a>
+              <a
+                className="font-medium text-zinc-700 underline-offset-4 transition hover:text-zinc-950 hover:underline"
+                href="https://elaxuwu.me/"
+                rel="noreferrer"
+                target="_blank"
+              >
+                Đỗ Ngọc Thiên Bảo (elax)
+              </a>
+              <a
+                className="font-medium text-zinc-700 underline-offset-4 transition hover:text-zinc-950 hover:underline"
+                href="https://github.com/SamKang5"
+                rel="noreferrer"
+                target="_blank"
+              >
+                Phạm Hoàng Khang
+              </a>
+            </div>
+          </div>
             </>
           ) : null}
         </div>
