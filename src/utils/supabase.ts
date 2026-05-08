@@ -1,12 +1,19 @@
 import { createClient } from "@supabase/supabase-js";
 
-// Frontend Supabase client. Fail early so missing env vars do not turn into
-// vague dashboard errors later.
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
+// Supabase is the primary path. The fallback client only exists so the app can
+// keep running in local guest mode if Supabase config is missing or unusable.
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL?.trim().replace(/\/+$/, "");
+const supabaseKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY?.trim();
+const fallbackSupabaseUrl = "https://localhost.invalid";
+const fallbackSupabaseKey = "local-fallback";
 
-if (!supabaseUrl || !supabaseKey) {
-  throw new Error("Missing Supabase environment variables.");
-}
+export const isSupabaseConfigured = Boolean(
+  supabaseUrl?.startsWith("https://") && supabaseKey,
+);
+export const supabaseConfigErrorMessage =
+  "Supabase is unavailable. ClinicScribe will fall back to local guest mode.";
 
-export const supabase = createClient(supabaseUrl, supabaseKey);
+export const supabase = createClient(
+  isSupabaseConfigured ? supabaseUrl : fallbackSupabaseUrl,
+  isSupabaseConfigured ? supabaseKey : fallbackSupabaseKey,
+);

@@ -1,4 +1,8 @@
-import { supabase } from "./supabase";
+import {
+  isSupabaseConfigured,
+  supabase,
+  supabaseConfigErrorMessage,
+} from "./supabase";
 
 // Supabase dashboard helpers for patient profiles and encounter records.
 export type PatientDraft = {
@@ -136,6 +140,10 @@ const toVisitTimestamp = (visitDate: string) => {
 };
 
 const getCurrentUser = async (): Promise<CurrentSupabaseUser> => {
+  if (!isSupabaseConfigured) {
+    throw new Error(supabaseConfigErrorMessage);
+  }
+
   const {
     data: { user },
     error,

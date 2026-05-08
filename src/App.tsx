@@ -8,11 +8,16 @@ import {
   saveEncounterRecord,
   savePatientProfile,
   updateEncounterSummary,
+  type EncounterDetail,
   type EncounterSummary,
   type PatientDraft,
   type PatientProfile,
 } from "./utils/clinicRecords";
-import { supabase } from "./utils/supabase";
+import {
+  isSupabaseConfigured,
+  supabase,
+  supabaseConfigErrorMessage,
+} from "./utils/supabase";
 
 // Kept in one file for this project because the recorder, note view, dashboard,
 // and patient pages all share a lot of state.
@@ -976,7 +981,33 @@ const clearPendingGuestSync = () => {
   sessionStorage.removeItem(GUEST_SYNC_SOURCE_KEY);
 };
 
+const getErrorText = (error: unknown) =>
+  error instanceof Error ? error.message : "";
+
+const shouldUseLocalFallback = (error: unknown) => {
+  if (!isSupabaseConfigured) {
+    return true;
+  }
+
+  const message = getErrorText(error).toLowerCase();
+
+  return [
+    "failed to fetch",
+    "networkerror",
+    "network request failed",
+    "load failed",
+    "unable to verify authentication",
+    "unable to verify supabase authentication",
+    "missing supabase",
+    "supabase is unavailable",
+  ].some((fragment) => message.includes(fragment));
+};
+
 const getSupabaseAccessToken = async () => {
+  if (!isSupabaseConfigured) {
+    throw new Error(supabaseConfigErrorMessage);
+  }
+
   const {
     data: { session },
     error,
@@ -1971,6 +2002,30 @@ function App() {
   const isGuestMode = currentUser?.isGuest === true;
   const guestId = isGuestMode ? currentUser.id : "";
 
+  const activateLocalGuestSession = (statusMessage = "Guest mode") => {
+    const guestUser = makeGuestUser();
+
+    setGuestModeActive(true);
+    setCurrentUser(guestUser);
+    setAuthError("");
+    setStatus(statusMessage);
+
+    void ensureGuestApiSession(guestUser.id).catch(() => {
+      setStatus("Local guest mode");
+    });
+
+    return guestUser;
+  };
+
+  const useLocalFallback = (_sourceError?: unknown) => {
+    const guestUser = activateLocalGuestSession("Local guest mode");
+
+    setVaultError("");
+    setPatientRecordStatus("Supabase unavailable. Local mode active.");
+
+    return guestUser;
+  };
+
   useEffect(
     () => () => {
       if (dashboardFilterCloseTimerRef.current !== null) {
@@ -2043,12 +2098,7 @@ function App() {
     setIsAuthSubmitting(true);
 
     try {
-      const guestUser = makeGuestUser();
-
-      await ensureGuestApiSession(guestUser.id);
-      setGuestModeActive(true);
-      setCurrentUser(guestUser);
-      setStatus("Guest mode");
+      activateLocalGuestSession("Guest mode");
     } catch (guestError) {
       setAuthError(
         guestError instanceof Error
@@ -2128,6 +2178,11 @@ function App() {
     setIsAuthSubmitting(true);
 
     try {
+      if (!isSupabaseConfigured) {
+        useLocalFallback(new Error(supabaseConfigErrorMessage));
+        return;
+      }
+
       const email = authEmail.trim();
       const password = authPassword;
 
@@ -2173,6 +2228,11 @@ function App() {
       setAuthPasswordConfirmation("");
       setAuthError("");
     } catch (submitError) {
+      if (shouldUseLocalFallback(submitError)) {
+        useLocalFallback(submitError);
+        return;
+      }
+
       setAuthError(
         submitError instanceof Error
           ? submitError.message
@@ -2191,7 +2251,7 @@ function App() {
       if (isGuestMode) {
         setGuestModeActive(false);
         await clearGuestApiSession();
-      } else {
+      } else if (isSupabaseConfigured) {
         const { error: signOutError } = await supabase.auth.signOut();
 
         if (signOutError) {
@@ -2247,6 +2307,16 @@ function App() {
       setSavedNotes(notes);
       return notes;
     } catch (notesError) {
+      if (!isGuestMode && shouldUseLocalFallback(notesError)) {
+        const localUser = useLocalFallback(notesError);
+        const notes = sortSavedNotes(
+          readGuestEncounterRecords(localUser.id).map(toSavedNoteSummary),
+        );
+
+        setSavedNotes(notes);
+        return notes;
+      }
+
       if (!options.silent) {
         setVaultError(
           notesError instanceof Error ? notesError.message : "Unable to load notes.",
@@ -2273,6 +2343,14 @@ function App() {
       setPatientProfiles(profiles);
       return profiles;
     } catch (profileError) {
+      if (!isGuestMode && shouldUseLocalFallback(profileError)) {
+        const localUser = useLocalFallback(profileError);
+        const profiles = readGuestPatientProfiles(localUser.id);
+
+        setPatientProfiles(profiles);
+        return profiles;
+      }
+
       if (!options.silent) {
         setVaultError(
           profileError instanceof Error
@@ -2371,6 +2449,20 @@ function App() {
       setNoteError("");
       navigateToView("note");
     } catch (openError) {
+      if (!isGuestMode && shouldUseLocalFallback(openError)) {
+        const localUser = useLocalFallback(openError);
+        const localNote = readGuestEncounterRecords(localUser.id).find(
+          (record) => record.id === noteId,
+        );
+
+        setVaultError(
+          localNote
+            ? ""
+            : "Supabase unavailable. Switched to local mode; this cloud note is not on this browser.",
+        );
+        return;
+      }
+
       setVaultError(
         openError instanceof Error ? openError.message : "Unable to open note.",
       );
@@ -2421,6 +2513,20 @@ function App() {
         );
       }
     } catch (updateError) {
+      if (!isGuestMode && shouldUseLocalFallback(updateError)) {
+        const localUser = useLocalFallback(updateError);
+        const localRecord = readGuestEncounterRecords(localUser.id).find(
+          (record) => record.id === noteId,
+        );
+
+        setVaultError(
+          localRecord
+            ? ""
+            : "Supabase unavailable. Switched to local mode; this cloud note is not on this browser.",
+        );
+        return;
+      }
+
       setVaultError(
         updateError instanceof Error
           ? updateError.message
@@ -2474,6 +2580,14 @@ function App() {
         navigateToView("dashboard");
       }
     } catch (deleteError) {
+      if (!isGuestMode && shouldUseLocalFallback(deleteError)) {
+        useLocalFallback(deleteError);
+        setVaultError(
+          "Supabase unavailable. Switched to local mode; this cloud note was not deleted.",
+        );
+        return;
+      }
+
       setVaultError(
         deleteError instanceof Error
           ? deleteError.message
@@ -2613,6 +2727,12 @@ function App() {
 
       void refreshSavedData({ silent: true });
     } catch (translationError) {
+      if (!isGuestMode && shouldUseLocalFallback(translationError)) {
+        useLocalFallback(translationError);
+        setNoteError("Supabase unavailable. Switched to local mode; try translating again.");
+        return;
+      }
+
       setNoteError(
         translationError instanceof Error
           ? translationError.message
@@ -2754,6 +2874,12 @@ function App() {
         );
       }
     } catch (editError) {
+      if (!isGuestMode && shouldUseLocalFallback(editError)) {
+        useLocalFallback(editError);
+        setNoteChatError("Supabase unavailable. Switched to local mode; try again.");
+        return;
+      }
+
       setNoteChatError(
         editError instanceof Error
           ? editError.message
@@ -2837,6 +2963,13 @@ function App() {
       setTranslationStatus("");
       setStatus("Transcript added");
     } catch (transcriptionError) {
+      if (!isGuestMode && shouldUseLocalFallback(transcriptionError)) {
+        useLocalFallback(transcriptionError);
+        setError("Supabase unavailable. Switched to local mode; try recording again.");
+        setStatus("Local guest mode");
+        return;
+      }
+
       setError(
         transcriptionError instanceof Error
           ? transcriptionError.message
@@ -3020,6 +3153,12 @@ function App() {
       setAutosaveStatus("Transcript cleared after saving");
       navigateToView("note");
     } catch (noteGenerationError) {
+      if (!isGuestMode && shouldUseLocalFallback(noteGenerationError)) {
+        useLocalFallback(noteGenerationError);
+        setNoteError("Supabase unavailable. Switched to local mode; try generating again.");
+        return;
+      }
+
       setNoteError(
         noteGenerationError instanceof Error
           ? noteGenerationError.message
@@ -3046,22 +3185,10 @@ function App() {
     setNoteError("");
     setPatientRecordStatus(options.silent ? "Autosaving..." : "");
 
-    try {
-      const savedEncounter = isGuestMode
-        ? saveGuestEncounterRecord(guestId, {
-            encounterId: currentEncounterId || undefined,
-            patientDraft,
-            noteJson: toNoteRecord(source),
-            transcript: currentNoteTranscript,
-            title: currentNoteTitle,
-          })
-        : await saveEncounterRecord({
-            encounterId: currentEncounterId || undefined,
-            patientDraft,
-            noteJson: toNoteRecord(source),
-            transcript: currentNoteTranscript,
-            title: currentNoteTitle,
-          });
+    const applySavedEncounter = (
+      savedEncounter: EncounterDetail,
+      fallbackStatus?: string,
+    ) => {
       const savedSummary = toSavedNoteSummary(savedEncounter);
       const savedNoteResult = savedEncounter.result as NoteResult;
 
@@ -3092,13 +3219,53 @@ function App() {
       lastPatientRecordAutosaveSignatureRef.current =
         options.signature || getPatientRecordAutosaveSignature(savedNoteResult);
       setPatientRecordStatus(
-        options.silent
-          ? `Autosaved at ${getAutosaveTimeLabel()}`
-          : currentEncounterId
-            ? "Patient record updated."
-            : "Patient record saved to dashboard.",
+        fallbackStatus ??
+          (options.silent
+            ? `Autosaved at ${getAutosaveTimeLabel()}`
+            : currentEncounterId
+              ? "Patient record updated."
+              : "Patient record saved to dashboard."),
       );
+    };
+
+    try {
+      const savedEncounter = isGuestMode
+        ? saveGuestEncounterRecord(guestId, {
+            encounterId: currentEncounterId || undefined,
+            patientDraft,
+            noteJson: toNoteRecord(source),
+            transcript: currentNoteTranscript,
+            title: currentNoteTitle,
+          })
+        : await saveEncounterRecord({
+            encounterId: currentEncounterId || undefined,
+            patientDraft,
+            noteJson: toNoteRecord(source),
+            transcript: currentNoteTranscript,
+            title: currentNoteTitle,
+          });
+
+      applySavedEncounter(savedEncounter);
     } catch (saveError) {
+      if (!isGuestMode && shouldUseLocalFallback(saveError)) {
+        const localUser = useLocalFallback(saveError);
+        const savedEncounter = saveGuestEncounterRecord(localUser.id, {
+          encounterId: currentEncounterId || undefined,
+          patientDraft,
+          noteJson: toNoteRecord(source),
+          transcript: currentNoteTranscript,
+          title: currentNoteTitle,
+        });
+
+        applySavedEncounter(
+          savedEncounter,
+          options.silent
+            ? `Autosaved locally at ${getAutosaveTimeLabel()}`
+            : "Supabase unavailable. Patient record saved locally.",
+        );
+        return;
+      }
+
       const message =
         saveError instanceof Error
           ? saveError.message
@@ -3175,6 +3342,26 @@ function App() {
       }));
       setPatientRecordStatus(`Patient profile ready: ${profile.name}.`);
     } catch (profileError) {
+      if (!isGuestMode && shouldUseLocalFallback(profileError)) {
+        const localUser = useLocalFallback(profileError);
+        const profile = upsertGuestPatientProfile(localUser.id, {
+          patientId: patientDraft.patientId,
+          name: patientDraft.name,
+          age: patientDraft.age,
+          gender: patientDraft.gender,
+        });
+
+        setPatientProfiles((currentProfiles) =>
+          upsertPatientProfileList(currentProfiles, profile),
+        );
+        setPatientDraft((current) => ({
+          ...current,
+          ...getPatientProfileDraftPatch(profile),
+        }));
+        setPatientRecordStatus(`Supabase unavailable. Local profile ready: ${profile.name}.`);
+        return;
+      }
+
       setNoteError(
         profileError instanceof Error
           ? profileError.message
@@ -3190,6 +3377,15 @@ function App() {
     let isMounted = true;
 
     const checkAuth = async () => {
+      if (!isSupabaseConfigured) {
+        if (isMounted) {
+          useLocalFallback(new Error(supabaseConfigErrorMessage));
+          setIsCheckingAuth(false);
+        }
+
+        return;
+      }
+
       try {
         const {
           data: { session },
@@ -3209,11 +3405,15 @@ function App() {
         }
       } catch (authCheckError) {
         if (isMounted) {
-          setAuthError(
-            authCheckError instanceof Error
-              ? authCheckError.message
-              : "Unable to check your session.",
-          );
+          if (shouldUseLocalFallback(authCheckError)) {
+            useLocalFallback(authCheckError);
+          } else {
+            setAuthError(
+              authCheckError instanceof Error
+                ? authCheckError.message
+                : "Unable to check your session.",
+            );
+          }
         }
       } finally {
         if (isMounted) {
@@ -3223,6 +3423,13 @@ function App() {
     };
 
     void checkAuth();
+
+    if (!isSupabaseConfigured) {
+      return () => {
+        isMounted = false;
+      };
+    }
+
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
