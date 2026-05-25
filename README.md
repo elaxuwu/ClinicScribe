@@ -195,6 +195,8 @@ For evaluation, we tested the app using sample de-identified clinic conversation
 
 Licensed under **PolyForm Noncommercial License 1.0.0**.
 
+All trademarks and logos are the property of the original author and are not licensed under this agreement.
+
 In simple terms, this is **similar** to **CC BY-NC 4.0**:
 
 	Attribution: You must credit me.
